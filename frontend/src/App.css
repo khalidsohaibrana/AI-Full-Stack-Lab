@@ -1,0 +1,59 @@
+:root {
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  color: #e8edf5;
+  background: #10131a;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; }
+
+.app-shell {
+  width: min(720px, calc(100% - 32px));
+  margin: 72px auto;
+}
+
+.eyebrow {
+  color: #8ea4c7;
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+}
+
+h1 {
+  max-width: 620px;
+  font-size: clamp(2.2rem, 7vw, 4.8rem);
+  line-height: 0.98;
+  margin: 20px 0;
+}
+
+.intro { color: #aeb9ca; }
+.chat-form { display: grid; gap: 12px; margin-top: 36px; }
+textarea {
+  resize: vertical;
+  padding: 16px;
+  border: 1px solid #364154;
+  border-radius: 12px;
+  color: inherit;
+  background: #181d27;
+  font: inherit;
+}
+button {
+  width: fit-content;
+  padding: 12px 18px;
+  border: 0;
+  border-radius: 999px;
+  color: #10131a;
+  background: #b9f36b;
+  font-weight: 700;
+  cursor: pointer;
+}
+button:disabled { cursor: wait; opacity: 0.6; }
+.answer {
+  margin-top: 36px;
+  padding: 24px;
+  border: 1px solid #364154;
+  border-radius: 16px;
+  background: #181d27;
+}
+.answer p:last-child { white-space: pre-wrap; line-height: 1.6; }
+.error { color: #ff9d9d; }
