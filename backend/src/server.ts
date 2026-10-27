@@ -4,7 +4,10 @@ import express from "express";
 import OpenAI from "openai";
 import type { ChatMessage } from "./chat/types.js";
 import { loadConfig } from "./config.js";
-import { estimateContext } from "./context/token-estimator.js";
+import {
+  ContextWindowError,
+  prepareContext,
+} from "./context/context-manager.js";
 
 const config = loadConfig();
 const app = express();
@@ -62,6 +65,8 @@ app.get("/api/health", (_request, response) => {
       contextSafetyMarginTokens: config.ai.contextSafetyMarginTokens,
       availableInputTokens: config.ai.availableInputTokens,
       tokenEstimator: config.ai.tokenEstimator.strategy,
+      truncationStrategy: config.ai.contextTruncationStrategy,
+      oversizedMessagePolicy: config.ai.oversizedMessagePolicy,
     },
   });
 });
@@ -99,22 +104,52 @@ app.post("/api/chat", async (request, response) => {
     return;
   }
 
-  const contextEstimate = estimateContext(
-    config.ai.instructions,
-    rawMessages,
-    config.ai.tokenEstimator,
-    config.ai.availableInputTokens,
-  );
+  let managedContext;
+
+  try {
+    managedContext = prepareContext(
+      config.ai.instructions,
+      rawMessages,
+      config.ai.tokenEstimator,
+      config.ai.availableInputTokens,
+      {
+        strategy: config.ai.contextTruncationStrategy,
+        oversizedMessagePolicy: config.ai.oversizedMessagePolicy,
+      },
+    );
+  } catch (error) {
+    if (error instanceof ContextWindowError) {
+      response.status(
+        error.code === "instructions_too_large" ? 503 : 400,
+      ).json({
+        error: "context window limit cannot accommodate this request",
+        code: error.code,
+        details: error.message,
+      });
+      return;
+    }
+
+    throw error;
+  }
 
   try {
     const modelResponse = await modelClient.responses.create({
       model: aiModel,
       max_output_tokens: config.ai.maxOutputTokens,
       instructions: config.ai.instructions,
-      input: rawMessages,
+      input: managedContext.messages,
     });
 
-    response.json({ text: modelResponse.output_text, context: contextEstimate });
+    response.json({
+      text: modelResponse.output_text,
+      context: {
+        ...managedContext.estimate,
+        ...managedContext.truncation,
+        contextWindowTokens: config.ai.contextWindowTokens,
+        maxOutputTokens: config.ai.maxOutputTokens,
+        contextSafetyMarginTokens: config.ai.contextSafetyMarginTokens,
+      },
+    });
   } catch (error) {
     console.error(error);
     response.status(500).json({ error: "model request failed" });

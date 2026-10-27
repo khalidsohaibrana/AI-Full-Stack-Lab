@@ -16,7 +16,7 @@ export type ContextEstimate = {
   withinBudget: boolean;
 };
 
-function estimateTextTokens(
+export function estimateTextTokens(
   text: string,
   config: TokenEstimatorConfig,
 ): number {
@@ -31,7 +31,7 @@ function estimateTextTokens(
     : Math.ceil(characterCount / config.charsPerToken);
 }
 
-function estimateMessageTokens(
+export function estimateMessageTokens(
   message: ChatMessage,
   config: TokenEstimatorConfig,
 ): number {

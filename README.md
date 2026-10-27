@@ -57,6 +57,8 @@ AI_CONTEXT_SAFETY_MARGIN_TOKENS=500
 AI_TOKEN_ESTIMATOR=character-ratio
 AI_CHARS_PER_TOKEN=4
 AI_MESSAGE_OVERHEAD_TOKENS=4
+AI_CONTEXT_TRUNCATION_STRATEGY=recent-turns
+AI_OVERSIZED_MESSAGE_POLICY=reject
 PORT=3001
 FRONTEND_ORIGIN=http://localhost:5173
 ```
@@ -105,15 +107,16 @@ curl -X POST http://localhost:3001/api/chat \
 
 ```bash
 npm run build
+npm test
 ```
 
-The build checks the backend TypeScript compilation and the frontend TypeScript/Vite production build.
+The build checks the backend TypeScript compilation and the frontend TypeScript/Vite production build. The test command verifies context-window truncation, turn preservation, immutability, and oversized-message handling.
 
 ## Architecture direction
 
 The baseline intentionally keeps the backend small. As the lessons progress, we will separate configuration, routes, model clients, conversation state, tools, the agent loop, planning, retrieval, approvals, checkpointing, and evaluation into explicit modules.
 
-The current chat feature implements short-term conversation memory only: the frontend sends its in-session messages array with every model request. Phase 1 defines a configurable token budget and output limit, and Phase 2 estimates input tokens without truncating messages yet. The estimator is intentionally provider-neutral and configurable because exact tokenization varies by model. There is no database persistence or summarization yet.
+The current chat feature implements short-term conversation memory only: the frontend sends its in-session messages array with every model request. Phase 1 defines a configurable token budget and output limit, Phase 2 estimates input tokens, and Phase 3 removes the oldest complete turns when the budget is exceeded. The UI includes a context inspector showing the context window, reserved output, safety margin, estimated input, available input, remaining input, and dropped messages. The estimator and truncation strategy are intentionally provider-neutral and configurable because exact tokenization and context limits vary by model. There is no database persistence or summarization yet.
 
 ## Git workflow
 

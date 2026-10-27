@@ -27,12 +27,14 @@ Phase 2 adds configurable token estimation:
     AI_TOKEN_ESTIMATOR=character-ratio
     AI_CHARS_PER_TOKEN=4
     AI_MESSAGE_OVERHEAD_TOKENS=4
+    AI_CONTEXT_TRUNCATION_STRATEGY=recent-turns
+    AI_OVERSIZED_MESSAGE_POLICY=reject
 
 The available input budget is calculated as:
 
     context window - maximum output - safety margin
 
-Phase 1 defines the policy and Phase 2 estimates each request through a pure backend module. The character-ratio estimator is intentionally transparent and provider-neutral; it is not exact provider tokenization. Message truncation and summarization will be implemented in later phases.
+Phase 1 defines the policy, Phase 2 estimates each request through a pure backend module, and Phase 3 applies recent complete-turn truncation. The character-ratio estimator is intentionally transparent and provider-neutral; it is not exact provider tokenization. The truncation strategy and oversized-message policy are configurable for future providers and models. Summarization will be implemented in a later phase.
 
 If the environment variables are missing, the backend still starts and logs a configuration warning. GET /api/health reports aiConfigured: false, while POST /api/chat returns HTTP 503 with setup instructions.
 
@@ -51,7 +53,10 @@ GET /api/health returns a basic service health response:
         "contextWindowTokens": 8000,
         "maxOutputTokens": 1000,
         "contextSafetyMarginTokens": 500,
-        "availableInputTokens": 6500
+        "availableInputTokens": 6500,
+        "tokenEstimator": "character-ratio",
+        "truncationStrategy": "recent-turns",
+        "oversizedMessagePolicy": "reject"
       }
     }
 
@@ -74,9 +79,16 @@ and returns HTTP 200:
         "estimatedInputTokens": 36,
         "availableInputTokens": 6500,
         "remainingInputTokens": 6464,
-        "withinBudget": true
+        "withinBudget": true,
+        "wasTruncated": false,
+        "receivedMessages": 1,
+        "sentMessages": 1,
+        "droppedMessages": 0,
+        "droppedTokens": 0
       }
     }
+
+When the conversation exceeds the configured input budget, the backend removes the oldest complete turns first. It preserves the newest user turn and never sends a partial user/assistant turn. If the newest individual message cannot fit, it returns HTTP 400 with a context-window error instead of calling the provider.
 
 The backend is currently stateless between requests. The client sends the current messages array on every request; the backend does not persist it in a database.
 
@@ -95,5 +107,6 @@ We can later build a second branch that ports this backend to NestJS and compare
 From the repository root:
 
     npm run build
+    npm test
 
-The backend build runs TypeScript compilation and writes generated files to backend/dist. Generated files and node_modules are ignored by Git.
+The backend build runs TypeScript compilation and writes generated files to backend/dist. The test command runs the context-manager tests with Node's built-in test runner through tsx. Generated files and node_modules are ignored by Git.

@@ -11,6 +11,8 @@ export type AppConfig = {
     maxOutputTokens: number;
     contextSafetyMarginTokens: number;
     availableInputTokens: number;
+    contextTruncationStrategy: "recent-turns";
+    oversizedMessagePolicy: "reject";
     tokenEstimator: {
       strategy: "character-ratio" | "whitespace";
       charsPerToken: number;
@@ -28,6 +30,8 @@ const defaults = {
   contextWindowTokens: 8_000,
   maxOutputTokens: 1_000,
   contextSafetyMarginTokens: 500,
+  contextTruncationStrategy: "recent-turns" as const,
+  oversizedMessagePolicy: "reject" as const,
   tokenEstimatorStrategy: "character-ratio" as const,
   charsPerToken: 4,
   messageOverheadTokens: 4,
@@ -46,6 +50,34 @@ function readTokenEstimatorStrategy(
     "AI_TOKEN_ESTIMATOR must be either character-ratio or whitespace",
   );
   return defaults.tokenEstimatorStrategy;
+}
+
+function readContextTruncationStrategy(
+  environment: Record<string, string | undefined>,
+  validationErrors: string[],
+): "recent-turns" {
+  const value = environment.AI_CONTEXT_TRUNCATION_STRATEGY?.trim();
+
+  if (!value) return defaults.contextTruncationStrategy;
+  if (value === "recent-turns") return value;
+
+  validationErrors.push(
+    "AI_CONTEXT_TRUNCATION_STRATEGY must be recent-turns",
+  );
+  return defaults.contextTruncationStrategy;
+}
+
+function readOversizedMessagePolicy(
+  environment: Record<string, string | undefined>,
+  validationErrors: string[],
+): "reject" {
+  const value = environment.AI_OVERSIZED_MESSAGE_POLICY?.trim();
+
+  if (!value) return defaults.oversizedMessagePolicy;
+  if (value === "reject") return value;
+
+  validationErrors.push("AI_OVERSIZED_MESSAGE_POLICY must be reject");
+  return defaults.oversizedMessagePolicy;
 }
 
 function readPositiveInteger(
@@ -152,6 +184,14 @@ export function loadConfig(
       maxOutputTokens,
       contextSafetyMarginTokens,
       availableInputTokens,
+      contextTruncationStrategy: readContextTruncationStrategy(
+        environment,
+        validationErrors,
+      ),
+      oversizedMessagePolicy: readOversizedMessagePolicy(
+        environment,
+        validationErrors,
+      ),
       tokenEstimator: {
         strategy: readTokenEstimatorStrategy(environment, validationErrors),
         charsPerToken,
