@@ -40,6 +40,18 @@ function App() {
     const trimmedContent = content.trim();
     if (!trimmedContent || isSending) return;
 
+    const conversation = [
+      ...messages
+        .filter((message) => !message.pending && !message.error)
+        .map(({ role, content: messageContent }) => ({
+          role,
+          content: messageContent,
+        })),
+      ...(addUserMessage
+        ? [{ role: "user" as const, content: trimmedContent }]
+        : []),
+    ];
+
     if (addUserMessage) {
       setMessages((current) => [
         ...current,
@@ -64,7 +76,7 @@ function App() {
       const result = await fetch(apiBaseUrl + "/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: trimmedContent }),
+        body: JSON.stringify({ messages: conversation }),
       });
       const data = await result.json();
 

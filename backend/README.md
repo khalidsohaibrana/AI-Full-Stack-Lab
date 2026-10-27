@@ -24,15 +24,21 @@ GET /api/health returns a basic service health response:
 
     { "ok": true, "service": "ai-fullstack-lab-backend", "aiConfigured": true }
 
-POST /api/chat accepts:
+POST /api/chat accepts the current in-session conversation:
 
-    { "message": "Explain event loops simply" }
+    {
+      "messages": [
+        { "role": "user", "content": "Explain event loops simply" }
+      ]
+    }
 
 and returns HTTP 200:
 
     { "text": "..." }
 
-Invalid input returns HTTP 400. Missing model configuration returns HTTP 503. Provider failures return HTTP 500.
+The backend is currently stateless between requests. The client sends the current messages array on every request; the backend does not persist it in a database.
+
+Only user and assistant roles are supported at this stage. Invalid input returns HTTP 400. Missing model configuration returns HTTP 503. Provider failures return HTTP 500.
 
 ## Why Express instead of NestJS?
 
