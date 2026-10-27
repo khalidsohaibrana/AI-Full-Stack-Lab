@@ -105,6 +105,8 @@ The build checks the backend TypeScript compilation and the frontend TypeScript/
 
 The baseline intentionally keeps the backend small. As the lessons progress, we will separate configuration, routes, model clients, conversation state, tools, the agent loop, planning, retrieval, approvals, checkpointing, and evaluation into explicit modules.
 
+The current chat feature implements short-term conversation memory only: the frontend sends its in-session messages array with every model request. There is no database persistence, summarization, or truncation yet.
+
 ## Git workflow
 
 The default branch is main. Use a descriptive branch for each change, for example:

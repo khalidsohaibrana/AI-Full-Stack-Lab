@@ -23,6 +23,23 @@ if (!aiApiKey || !aiModel) {
   );
 }
 
+type ChatMessage = {
+  role: "user" | "assistant";
+  content: string;
+};
+
+function isChatMessage(value: unknown): value is ChatMessage {
+  if (!value || typeof value !== "object") return false;
+
+  const message = value as Record<string, unknown>;
+
+  return (
+    (message.role === "user" || message.role === "assistant") &&
+    typeof message.content === "string" &&
+    message.content.trim().length > 0
+  );
+}
+
 app.use(cors({ origin: frontendOrigin }));
 app.use(express.json());
 
@@ -35,11 +52,18 @@ app.get("/api/health", (_request, response) => {
 });
 
 app.post("/api/chat", async (request, response) => {
-  const { message } = request.body as { message?: unknown };
+  const { messages: rawMessages } = request.body as {
+    messages?: unknown;
+  };
 
-  if (typeof message !== "string" || message.trim().length === 0) {
+  if (
+    !Array.isArray(rawMessages) ||
+    rawMessages.length === 0 ||
+    !rawMessages.every(isChatMessage)
+  ) {
     response.status(400).json({
-      error: "message must be a non-empty string",
+      error:
+        "messages must be a non-empty array containing user or assistant messages with non-empty content",
     });
     return;
   }
@@ -56,7 +80,7 @@ app.post("/api/chat", async (request, response) => {
     const modelResponse = await modelClient.responses.create({
       model: aiModel,
       instructions: "You are a helpful assistant. Answer clearly and concisely.",
-      input: message,
+      input: rawMessages,
     });
 
     response.json({ text: modelResponse.output_text });
