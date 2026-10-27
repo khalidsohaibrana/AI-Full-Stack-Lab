@@ -15,6 +15,25 @@ type Message = {
   retryContent?: string;
 };
 
+type ContextMetadata = {
+  contextWindowTokens: number;
+  maxOutputTokens: number;
+  contextSafetyMarginTokens: number;
+  estimator: string;
+  instructionsTokens: number;
+  messageTokens: number;
+  estimatedInputTokens: number;
+  availableInputTokens: number;
+  remainingInputTokens: number;
+  withinBudget: boolean;
+  strategy: string;
+  wasTruncated: boolean;
+  receivedMessages: number;
+  sentMessages: number;
+  droppedMessages: number;
+  droppedTokens: number;
+};
+
 const starterPrompts = [
   "Explain what an AI agent is",
   "What is the Node.js event loop?",
@@ -29,6 +48,8 @@ function App() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [draft, setDraft] = useState("");
   const [isSending, setIsSending] = useState(false);
+  const [contextMetadata, setContextMetadata] =
+    useState<ContextMetadata | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
 
@@ -39,6 +60,18 @@ function App() {
   async function sendMessage(content: string, addUserMessage = true) {
     const trimmedContent = content.trim();
     if (!trimmedContent || isSending) return;
+
+    const conversation = [
+      ...messages
+        .filter((message) => !message.pending && !message.error)
+        .map(({ role, content: messageContent }) => ({
+          role,
+          content: messageContent,
+        })),
+      ...(addUserMessage
+        ? [{ role: "user" as const, content: trimmedContent }]
+        : []),
+    ];
 
     if (addUserMessage) {
       setMessages((current) => [
@@ -64,18 +97,24 @@ function App() {
       const result = await fetch(apiBaseUrl + "/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: trimmedContent }),
+        body: JSON.stringify({ messages: conversation }),
       });
-      const data = await result.json();
+      const data = (await result.json()) as {
+        text?: string;
+        error?: string;
+        context?: ContextMetadata;
+      };
 
       if (!result.ok) {
         throw new Error(data.error ?? "The assistant could not respond.");
       }
 
+      setContextMetadata(data.context ?? null);
+
       setMessages((current) =>
         current.map((message) =>
           message.id === assistantId
-            ? { ...message, content: data.text, pending: false }
+            ? { ...message, content: data.text ?? "", pending: false }
             : message,
         ),
       );
@@ -123,6 +162,7 @@ function App() {
   function startNewChat() {
     setMessages([]);
     setDraft("");
+    setContextMetadata(null);
     composerRef.current?.focus();
   }
 
@@ -218,6 +258,68 @@ function App() {
           </div>
         )}
       </section>
+
+      {contextMetadata && (
+        <details className="context-inspector" open>
+          <summary>
+            <span>Context window</span>
+            <span
+              className={
+                "context-badge" +
+                (contextMetadata.wasTruncated ? " is-truncated" : "")
+              }
+            >
+              {contextMetadata.wasTruncated ? "Truncated" : "Within budget"}
+            </span>
+          </summary>
+          <div className="context-grid">
+            <div>
+              <span>Context window</span>
+              <strong>{contextMetadata.contextWindowTokens} tokens</strong>
+            </div>
+            <div>
+              <span>Reserved output</span>
+              <strong>{contextMetadata.maxOutputTokens} tokens</strong>
+            </div>
+            <div>
+              <span>Safety margin</span>
+              <strong>
+                {contextMetadata.contextSafetyMarginTokens} tokens
+              </strong>
+            </div>
+            <div>
+              <span>Estimated input</span>
+              <strong>{contextMetadata.estimatedInputTokens} tokens</strong>
+            </div>
+            <div>
+              <span>Available budget</span>
+              <strong>{contextMetadata.availableInputTokens} tokens</strong>
+            </div>
+            <div>
+              <span>Messages sent</span>
+              <strong>
+                {contextMetadata.sentMessages} / {contextMetadata.receivedMessages}
+              </strong>
+            </div>
+            <div>
+              <span>Remaining input</span>
+              <strong>{contextMetadata.remainingInputTokens} tokens</strong>
+            </div>
+            <div>
+              <span>Dropped messages</span>
+              <strong>{contextMetadata.droppedMessages}</strong>
+            </div>
+            <div>
+              <span>Strategy</span>
+              <strong>{contextMetadata.strategy}</strong>
+            </div>
+            <div>
+              <span>Estimator</span>
+              <strong>{contextMetadata.estimator}</strong>
+            </div>
+          </div>
+        </details>
+      )}
 
       <form className="composer" onSubmit={submitMessage}>
         <textarea
