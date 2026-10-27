@@ -46,13 +46,14 @@ cp backend/.env.example backend/.env
 Edit backend/.env:
 
 ```env
-OPENAI_API_KEY=your_api_key_here
-OPENAI_MODEL=your_available_model_name
+AI_API_KEY=your_provider_api_key_here
+AI_BASE_URL=https://api.groq.com/openai/v1
+AI_MODEL=openai/gpt-oss-20b
 PORT=3001
 FRONTEND_ORIGIN=http://localhost:5173
 ```
 
-The .env file is local-only and is ignored by Git. Never put the API key in the frontend.
+The .env file is local-only and is ignored by Git. Never put the API key in the frontend. The default example uses Groq's OpenAI-compatible API; change AI_BASE_URL and AI_MODEL when using another compatible provider.
 
 ## Run the application
 

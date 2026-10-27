@@ -6,14 +6,20 @@ import OpenAI from "openai";
 const app = express();
 const port = Number(process.env.PORT ?? 3001);
 const frontendOrigin = process.env.FRONTEND_ORIGIN ?? "http://localhost:5173";
-const apiKey = process.env.OPENAI_API_KEY?.trim();
-const model = process.env.OPENAI_MODEL?.trim();
+const aiApiKey = process.env.AI_API_KEY?.trim();
+const aiBaseUrl = process.env.AI_BASE_URL?.trim();
+const aiModel = process.env.AI_MODEL?.trim();
 
-const openai = apiKey ? new OpenAI({ apiKey }) : null;
+const modelClient = aiApiKey
+  ? new OpenAI({
+      apiKey: aiApiKey,
+      baseURL: aiBaseUrl || undefined,
+    })
+  : null;
 
-if (!apiKey || !model) {
+if (!aiApiKey || !aiModel) {
   console.warn(
-    "AI provider is not configured. Add OPENAI_API_KEY and OPENAI_MODEL to backend/.env before using /api/chat.",
+    "AI provider is not configured. Add AI_API_KEY and AI_MODEL to backend/.env before using /api/chat.",
   );
 }
 
@@ -24,7 +30,7 @@ app.get("/api/health", (_request, response) => {
   response.json({
     ok: true,
     service: "ai-fullstack-lab-backend",
-    aiConfigured: Boolean(openai && model),
+    aiConfigured: Boolean(modelClient && aiModel),
   });
 });
 
@@ -38,17 +44,17 @@ app.post("/api/chat", async (request, response) => {
     return;
   }
 
-  if (!openai || !model) {
+  if (!modelClient || !aiModel) {
     response.status(503).json({
       error:
-        "AI provider is not configured. Set OPENAI_API_KEY and OPENAI_MODEL in backend/.env, then restart the backend.",
+        "AI provider is not configured. Set AI_API_KEY and AI_MODEL in backend/.env, then restart the backend.",
     });
     return;
   }
 
   try {
-    const modelResponse = await openai.responses.create({
-      model,
+    const modelResponse = await modelClient.responses.create({
+      model: aiModel,
       instructions: "You are a helpful assistant. Answer clearly and concisely.",
       input: message,
     });

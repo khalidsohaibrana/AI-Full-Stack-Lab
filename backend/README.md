@@ -8,11 +8,13 @@ From this directory, install dependencies and create the local environment file:
 
     cp .env.example .env
 
-Set OPENAI_API_KEY and an available OPENAI_MODEL in .env, then run:
+Set AI_API_KEY, AI_BASE_URL, and an available AI_MODEL in .env, then run:
 
     npm run dev
 
 The API is available at http://localhost:3001.
+
+The default configuration targets Groq's OpenAI-compatible endpoint. The same client can be pointed at another compatible provider by changing AI_BASE_URL.
 
 If the environment variables are missing, the backend still starts and logs a configuration warning. GET /api/health reports aiConfigured: false, while POST /api/chat returns HTTP 503 with setup instructions.
 
