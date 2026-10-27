@@ -46,14 +46,22 @@ cp backend/.env.example backend/.env
 Edit backend/.env:
 
 ```env
+AI_PROVIDER=groq
 AI_API_KEY=your_provider_api_key_here
 AI_BASE_URL=https://api.groq.com/openai/v1
 AI_MODEL=openai/gpt-oss-20b
+AI_SYSTEM_INSTRUCTIONS=You are a helpful assistant. Answer clearly and concisely.
+AI_CONTEXT_WINDOW_TOKENS=8000
+AI_MAX_OUTPUT_TOKENS=1000
+AI_CONTEXT_SAFETY_MARGIN_TOKENS=500
+AI_TOKEN_ESTIMATOR=character-ratio
+AI_CHARS_PER_TOKEN=4
+AI_MESSAGE_OVERHEAD_TOKENS=4
 PORT=3001
 FRONTEND_ORIGIN=http://localhost:5173
 ```
 
-The .env file is local-only and is ignored by Git. Never put the API key in the frontend. The default example uses Groq's OpenAI-compatible API; change AI_BASE_URL and AI_MODEL when using another compatible provider.
+The .env file is local-only and is ignored by Git. Never put the API key in the frontend. The default example uses Groq's OpenAI-compatible API. When switching providers or models, update AI_PROVIDER, AI_BASE_URL, AI_API_KEY, AI_MODEL, and the context policy values. The backend calculates the available input budget as context window minus maximum output minus safety margin.
 
 ## Run the application
 
@@ -90,7 +98,7 @@ Test the chat endpoint:
 ```bash
 curl -X POST http://localhost:3001/api/chat \
   -H "Content-Type: application/json" \
-  -d '{"message":"Explain the Node.js event loop in one paragraph"}'
+  -d '{"messages":[{"role":"user","content":"Explain the Node.js event loop in one paragraph"}]}'
 ```
 
 ## Quality checks
@@ -105,7 +113,7 @@ The build checks the backend TypeScript compilation and the frontend TypeScript/
 
 The baseline intentionally keeps the backend small. As the lessons progress, we will separate configuration, routes, model clients, conversation state, tools, the agent loop, planning, retrieval, approvals, checkpointing, and evaluation into explicit modules.
 
-The current chat feature implements short-term conversation memory only: the frontend sends its in-session messages array with every model request. There is no database persistence, summarization, or truncation yet.
+The current chat feature implements short-term conversation memory only: the frontend sends its in-session messages array with every model request. Phase 1 defines a configurable token budget and output limit, and Phase 2 estimates input tokens without truncating messages yet. The estimator is intentionally provider-neutral and configurable because exact tokenization varies by model. There is no database persistence or summarization yet.
 
 ## Git workflow
 
