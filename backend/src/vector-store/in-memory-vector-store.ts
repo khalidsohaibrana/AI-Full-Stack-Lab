@@ -1,4 +1,4 @@
-import type { MemorySearchResult } from "../memory/types.js";
+import type { MemoryRecord, MemorySearchResult } from "../memory/types.js";
 import type {
   MemoryVectorRecord,
   VectorSearchQuery,
@@ -85,6 +85,13 @@ export class InMemoryVectorStore implements VectorStore {
       .filter((result) => result.similarity >= minSimilarity)
       .sort((left, right) => right.similarity - left.similarity)
       .slice(0, query.topK);
+  }
+
+  async list(userId: string): Promise<MemoryRecord[]> {
+    return [...this.records.values()]
+      .filter((record) => record.memory.userId === userId)
+      .map((record) => ({ ...record.memory }))
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
   }
 
   size(): number {

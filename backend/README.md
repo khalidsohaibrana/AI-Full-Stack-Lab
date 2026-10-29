@@ -101,6 +101,20 @@ The backend uses configurable token estimation:
     AI_CONTEXT_TRUNCATION_STRATEGY=recent-turns
     AI_OVERSIZED_MESSAGE_POLICY=reject
 
+Agent execution limits are configurable because tool behavior and model
+capabilities vary:
+
+    AI_AGENT_MAX_ITERATIONS=5
+    AI_AGENT_MAX_TOOL_CALLS=10
+    AI_AGENT_TOOL_TIMEOUT_MS=10000
+    AI_AGENT_MAX_TOOL_RESULT_CHARS=8000
+
+External tool providers are configurable as well:
+
+    AI_GEOCODING_BASE_URL=https://nominatim.openstreetmap.org/search
+    AI_WEATHER_BASE_URL=https://api.open-meteo.com/v1/forecast
+    AI_ROUTING_BASE_URL=https://router.project-osrm.org
+
 Embedding configuration is separate from chat configuration:
 
 For local Ollama:
@@ -129,6 +143,17 @@ The available input budget is calculated as:
     context window - maximum output - safety margin
 
 The context policy is implemented through pure backend modules. The character-ratio estimator is intentionally transparent and provider-neutral; it is not exact provider tokenization. The truncation strategy and oversized-message policy are configurable for future providers and models. Summarization is not included.
+
+The agent loop is implemented without an agent framework. It normalizes the
+OpenAI-compatible provider response, validates model-generated tool calls,
+executes registered tools with timeouts and result-size limits, and repeats
+until a final answer is returned or a configured limit is reached.
+
+The default external tools use OpenStreetMap Nominatim for place lookup,
+Open-Meteo for weather, and OSRM for driving, walking, and cycling routes.
+Directions also include a Google Maps directions URL. Replace the provider base URLs with compatible
+services when needed. Current browser location is optional and is sent only
+after explicit permission.
 
 If the environment variables are missing, the backend still starts and logs a configuration warning. GET /api/health reports aiConfigured: false, while POST /api/chat returns HTTP 503 with setup instructions.
 
@@ -163,6 +188,7 @@ GET /api/health returns a basic service health response:
 POST /api/chat accepts the current in-session conversation:
 
     {
+      "conversationId": "conversation_123",
       "messages": [
         { "role": "user", "content": "Explain event loops simply" }
       ]
@@ -190,7 +216,35 @@ and returns HTTP 200:
 
 When the conversation exceeds the configured input budget, the backend removes the oldest complete turns first. It preserves the newest user turn and never sends a partial user/assistant turn. If the newest individual message cannot fit, it returns HTTP 400 with a context-window error instead of calling the provider.
 
-The backend is currently stateless between requests. The client sends the current messages array on every request; the backend does not persist it in a database.
+## Persistent chat history
+
+Successful chat turns are stored as an exact transcript in the configured
+storage provider. PostgreSQL uses the `conversations` and `chat_messages`
+tables from `migrations/002_create_chat_history.sql`. The in-memory option is
+useful for learning but is cleared when the backend restarts.
+
+Apply all database migrations with:
+
+    npm run db:migrate --prefix backend
+
+The frontend opens previous conversations through the left feature sidebar. Chat
+history is deliberately separate from semantic memory: the transcript is
+ordered and exact, while semantic memories are selected by similarity and are
+injected into model instructions. Chat messages are not automatically embedded.
+
+The chat response includes `conversationId`. Send that ID with later chat
+requests to continue the same persisted conversation. If omitted, the backend
+creates a new conversation after a successful response.
+
+Create and browse saved conversations:
+
+    POST /api/conversations
+    GET /api/conversations?userId=local-user
+    GET /api/conversations/:conversationId/messages?userId=local-user
+
+Conversation endpoints always scope reads and writes by `userId`. The current
+learning project uses `local-user` as a default identity; authentication is a
+future concern.
 
 ## Semantic-memory contract
 

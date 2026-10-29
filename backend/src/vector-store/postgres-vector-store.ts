@@ -1,5 +1,5 @@
 import type { Pool } from "pg";
-import type { MemorySearchResult } from "../memory/types.js";
+import type { MemoryRecord, MemorySearchResult } from "../memory/types.js";
 import type {
   MemoryVectorRecord,
   VectorSearchQuery,
@@ -91,6 +91,21 @@ export class PostgresVectorStore implements VectorStore {
       memory: toMemoryRecord(row),
       similarity: Number(row.similarity ?? 0),
     }));
+  }
+
+  async list(userId: string): Promise<MemoryRecord[]> {
+    const result = await this.database.query<MemoryRow>(
+      `
+        SELECT id, user_id, content, type, importance,
+          source_conversation_id, created_at, updated_at
+        FROM memories
+        WHERE user_id = $1
+        ORDER BY updated_at DESC
+      `,
+      [userId],
+    );
+
+    return result.rows.map(toMemoryRecord);
   }
 
   async size(): Promise<number> {

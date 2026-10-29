@@ -35,6 +35,9 @@ function store(results: MemorySearchResult[]): VectorStore & { query?: VectorSea
       this.query = query;
       return results;
     },
+    async list() {
+      return results.map((result) => result.memory);
+    },
     size() {
       return results.length;
     },

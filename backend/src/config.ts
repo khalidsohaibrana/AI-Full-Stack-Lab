@@ -19,6 +19,17 @@ export type AppConfig = {
       messageOverheadTokens: number;
     };
   };
+  agent: {
+    maxIterations: number;
+    maxToolCalls: number;
+    toolTimeoutMs: number;
+    maxToolResultChars: number;
+  };
+  external: {
+    geocodingBaseUrl: string;
+    weatherBaseUrl: string;
+    routingBaseUrl: string;
+  };
   embedding: {
     provider: string;
     apiKey?: string;
@@ -57,6 +68,13 @@ const defaults = {
   charsPerToken: 4,
   messageOverheadTokens: 4,
   storageProvider: "in-memory" as const,
+  agentMaxIterations: 5,
+  agentMaxToolCalls: 10,
+  agentToolTimeoutMs: 10_000,
+  agentMaxToolResultChars: 8_000,
+  geocodingBaseUrl: "https://nominatim.openstreetmap.org/search",
+  weatherBaseUrl: "https://api.open-meteo.com/v1/forecast",
+  routingBaseUrl: "https://router.project-osrm.org",
 } as const;
 
 function readStorageProvider(
@@ -280,6 +298,32 @@ export function loadConfig(
   );
   const storageProvider = readStorageProvider(environment, storageValidationErrors);
   const databaseUrl = environment.AI_MEMORY_DATABASE_URL?.trim() || undefined;
+  const agentValidationErrors: string[] = [];
+  const agentMaxIterations = readPositiveInteger(
+    environment,
+    "AI_AGENT_MAX_ITERATIONS",
+    defaults.agentMaxIterations,
+    agentValidationErrors,
+  );
+  const agentMaxToolCalls = readPositiveInteger(
+    environment,
+    "AI_AGENT_MAX_TOOL_CALLS",
+    defaults.agentMaxToolCalls,
+    agentValidationErrors,
+  );
+  const agentToolTimeoutMs = readPositiveInteger(
+    environment,
+    "AI_AGENT_TOOL_TIMEOUT_MS",
+    defaults.agentToolTimeoutMs,
+    agentValidationErrors,
+  );
+  const agentMaxToolResultChars = readPositiveInteger(
+    environment,
+    "AI_AGENT_MAX_TOOL_RESULT_CHARS",
+    defaults.agentMaxToolResultChars,
+    agentValidationErrors,
+  );
+  validationErrors.push(...agentValidationErrors);
 
   if (storageProvider === "postgres" && !databaseUrl) {
     storageValidationErrors.push(
@@ -329,6 +373,20 @@ export function loadConfig(
         charsPerToken,
         messageOverheadTokens,
       },
+    },
+    agent: {
+      maxIterations: agentMaxIterations,
+      maxToolCalls: agentMaxToolCalls,
+      toolTimeoutMs: agentToolTimeoutMs,
+      maxToolResultChars: agentMaxToolResultChars,
+    },
+    external: {
+      geocodingBaseUrl:
+        environment.AI_GEOCODING_BASE_URL?.trim() || defaults.geocodingBaseUrl,
+      weatherBaseUrl:
+        environment.AI_WEATHER_BASE_URL?.trim() || defaults.weatherBaseUrl,
+      routingBaseUrl:
+        environment.AI_ROUTING_BASE_URL?.trim() || defaults.routingBaseUrl,
     },
     embedding: {
       provider:

@@ -31,6 +31,9 @@ function store() {
     async search() {
       return [];
     },
+    async list() {
+      return records.map((record) => record.memory);
+    },
     size: () => records.length,
   };
 }

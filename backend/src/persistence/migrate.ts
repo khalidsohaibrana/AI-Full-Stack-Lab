@@ -9,15 +9,19 @@ if (!databaseUrl) {
   throw new Error("Set AI_MEMORY_DATABASE_URL before running database migrations.");
 }
 
-const migrationPath = fileURLToPath(
-  new URL("../../migrations/001_create_memories.sql", import.meta.url),
-);
-const migration = await readFile(migrationPath, "utf8");
 const pool = new Pool({ connectionString: databaseUrl });
 
 try {
-  await pool.query(migration);
-  console.log("Database migration completed.");
+  for (const fileName of [
+    "001_create_memories.sql",
+    "002_create_chat_history.sql",
+  ]) {
+    const migrationPath = fileURLToPath(
+      new URL(`../../migrations/${fileName}`, import.meta.url),
+    );
+    await pool.query(await readFile(migrationPath, "utf8"));
+    console.log(`Applied ${fileName}.`);
+  }
 } finally {
   await pool.end();
 }

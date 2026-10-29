@@ -186,6 +186,13 @@ AI_CHARS_PER_TOKEN=4
 AI_MESSAGE_OVERHEAD_TOKENS=4
 AI_CONTEXT_TRUNCATION_STRATEGY=recent-turns
 AI_OVERSIZED_MESSAGE_POLICY=reject
+AI_AGENT_MAX_ITERATIONS=5
+AI_AGENT_MAX_TOOL_CALLS=10
+AI_AGENT_TOOL_TIMEOUT_MS=10000
+AI_AGENT_MAX_TOOL_RESULT_CHARS=8000
+AI_GEOCODING_BASE_URL=https://nominatim.openstreetmap.org/search
+AI_WEATHER_BASE_URL=https://api.open-meteo.com/v1/forecast
+AI_ROUTING_BASE_URL=https://router.project-osrm.org
 AI_EMBEDDING_PROVIDER=openai-compatible
 AI_EMBEDDING_API_KEY=ollama
 AI_EMBEDDING_BASE_URL=http://localhost:11434/v1
@@ -270,9 +277,66 @@ The build checks the backend TypeScript compilation and the frontend TypeScript/
 
 The baseline intentionally keeps the backend small. As the lessons progress, we will separate configuration, routes, model clients, conversation state, tools, the agent loop, planning, retrieval, approvals, checkpointing, and evaluation into explicit modules.
 
-The current chat feature implements short-term conversation memory only: the frontend sends its in-session messages array with every model request. The backend uses a configurable token budget, estimates input tokens, and removes the oldest complete turns when the budget is exceeded. The UI includes a context inspector showing the context window, reserved output, safety margin, estimated input, available input, remaining input, and dropped messages. The estimator and truncation strategy are intentionally provider-neutral and configurable because exact tokenization and context limits vary by model. The conversation transcript is not persisted or summarized yet.
+The current chat feature implements short-term conversation memory: the frontend sends its in-session messages array with every model request. The backend uses a configurable token budget, estimates input tokens, and removes the oldest complete turns when the budget is exceeded. The UI includes a context inspector showing the context window, reserved output, safety margin, estimated input, available input, remaining input, and dropped messages. The estimator and truncation strategy are intentionally provider-neutral and configurable because exact tokenization and context limits vary by model.
+
+Chat history is persisted separately from semantic memory. Successful turns are
+stored as exact user/assistant messages in PostgreSQL when
+`AI_MEMORY_STORE=postgres`, or in process memory when `AI_MEMORY_STORE=in-memory`.
+The left feature sidebar lists previous chat threads and opens their complete
+transcripts. Run `npm run db:migrate --prefix backend` after cloning or when
+updating the database schema. Chat history uses the same configurable storage
+selection but does not embed or automatically convert transcript messages into
+long-term memories.
 
 The backend now provides semantic memory with validated records for facts, preferences, and projects, a provider-neutral OpenAI-compatible embedding adapter, configurable in-memory or PostgreSQL/pgvector storage, retrieval context injection, explicit memory writing, and retrieval evaluation. Automatic memory extraction and conflict resolution are not included.
+
+The current agent loop provides provider-neutral tool contracts, a tool
+registry, calculator/current-time/memory-search tools, validated tool calls,
+bounded execution, tool-result messages, and frontend execution metadata. Its
+limits are configurable through the `AI_AGENT_*` variables in
+`backend/.env.example`.
+
+It also includes weather and directions tools. The defaults use OpenStreetMap
+Nominatim for place lookup, Open-Meteo for weather, and OSRM for route
+calculations; directions include a Google Maps directions URL. Configure
+compatible providers with the `AI_*_BASE_URL`
+variables. Current location is sent only after the user explicitly grants
+browser permission.
+
+To show an embedded Google Maps directions preview in the chat, copy
+`frontend/.env.example` to `frontend/.env`, set
+`VITE_GOOGLE_MAPS_API_KEY`, enable the Google Maps Embed API, restrict the key
+by HTTP referrer, and restart the frontend. The backend never receives this
+frontend embed key.
+
+### Get a Google Maps Embed API key
+
+1. Open [Google Maps Platform > Keys & Credentials](https://console.cloud.google.com/google/maps-apis/credentials).
+2. Create or select a Google Cloud project.
+3. Make sure billing is enabled for the project. Google documents the Embed
+   API as having no charge for typical embed requests, but a billing-enabled
+   Cloud project and valid key are still required.
+4. Open [API Library](https://console.cloud.google.com/apis/library) and enable
+   **Maps Embed API** for the project.
+5. Return to **Keys & Credentials**, select **Create credentials → API key**.
+6. Restrict the key:
+   - Application restriction: **Websites (HTTP referrers)**
+   - Website restriction: `http://localhost:5173/*`
+   - API restriction: **Restrict key → Maps Embed API**
+7. Copy the key into the local frontend environment file:
+
+       cp frontend/.env.example frontend/.env
+
+       VITE_GOOGLE_MAPS_API_KEY=your_key_here
+
+8. Restart Vite after changing the file:
+
+       npm run dev:frontend
+
+The key is intentionally used by the browser to load the map, so it is not a
+private backend secret. Referrer and API restrictions are essential. Never put
+the key in Git, and never put a hosted model or database credential in the
+frontend environment.
 
 ## Git workflow
 

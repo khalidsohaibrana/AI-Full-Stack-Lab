@@ -21,5 +21,6 @@ export type VectorSearchQuery = {
 export interface VectorStore {
   upsert(record: MemoryVectorRecord): Promise<void>;
   search(query: VectorSearchQuery): Promise<MemorySearchResult[]>;
+  list(userId: string): Promise<MemoryRecord[]>;
   size(): number | Promise<number>;
 }
