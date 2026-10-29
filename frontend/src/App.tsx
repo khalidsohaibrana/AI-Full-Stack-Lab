@@ -15,6 +15,76 @@ type Message = {
   retryContent?: string;
 };
 
+type Conversation = {
+  id: string;
+  userId: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type ContextMetadata = {
+  contextWindowTokens: number;
+  maxOutputTokens: number;
+  contextSafetyMarginTokens: number;
+  estimator: string;
+  instructionsTokens: number;
+  messageTokens: number;
+  estimatedInputTokens: number;
+  availableInputTokens: number;
+  remainingInputTokens: number;
+  withinBudget: boolean;
+  strategy: string;
+  wasTruncated: boolean;
+  receivedMessages: number;
+  sentMessages: number;
+  droppedMessages: number;
+  droppedTokens: number;
+};
+
+type RetrievalMetadata = {
+  enabled: boolean;
+  reason: string;
+  userId: string;
+  query: string;
+  resultCount: number;
+  results: Array<{ memoryId: string; similarity: number }>;
+};
+
+type AgentEvent = {
+  type: string;
+  iteration?: number;
+  name?: string;
+  isError?: boolean;
+  reason?: string;
+  output?: unknown;
+};
+
+type AgentMetadata = {
+  iterations: number;
+  toolCalls: number;
+  events: AgentEvent[];
+};
+
+type DirectionsOutput = {
+  origin?: { name?: string; latitude?: number; longitude?: number };
+  destination?: { name?: string; latitude?: number; longitude?: number };
+  googleMapsUrl?: string;
+  distanceKm?: number;
+  durationMinutes?: number;
+};
+
+type MemoryType = "fact" | "preference" | "project";
+type CurrentLocation = { latitude: number; longitude: number };
+type MemoryRecord = {
+  id: string;
+  content: string;
+  type: MemoryType;
+  importance: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
 const starterPrompts = [
   "Explain what an AI agent is",
   "What is the Node.js event loop?",
@@ -25,10 +95,110 @@ function createId() {
   return crypto.randomUUID();
 }
 
+function formatAgentEvent(event: AgentEvent): string {
+  if (event.type === "started") return "Agent started";
+  if (event.type === "tool_selected") return "Selected tool";
+  if (event.type === "tool_completed") {
+    return event.isError ? "Tool failed" : "Tool completed";
+  }
+  if (event.type === "finished") return "Final answer generated";
+  if (event.type === "stopped") return `Agent stopped: ${event.reason ?? "unknown reason"}`;
+  return event.type.replaceAll("_", " ");
+}
+
+function getDirectionsOutput(agent: AgentMetadata | null): DirectionsOutput | null {
+  const event = agent?.events.find(
+    (candidate) => candidate.type === "tool_completed" && candidate.name === "get_directions" && !candidate.isError,
+  );
+  return event?.output && typeof event.output === "object"
+    ? (event.output as DirectionsOutput)
+    : null;
+}
+
+function buildGoogleMapsEmbedUrl(apiKey: string, directions: DirectionsOutput): string {
+  const origin = directions.origin?.latitude !== undefined && directions.origin.longitude !== undefined
+    ? `${directions.origin.latitude},${directions.origin.longitude}`
+    : directions.origin?.name ?? "";
+  const destination = directions.destination?.latitude !== undefined && directions.destination.longitude !== undefined
+    ? `${directions.destination.latitude},${directions.destination.longitude}`
+    : directions.destination?.name ?? "";
+  const url = new URL("https://www.google.com/maps/embed/v1/directions");
+  url.searchParams.set("key", apiKey);
+  url.searchParams.set("origin", origin);
+  url.searchParams.set("destination", destination);
+  return url.toString();
+}
+
+function DirectionsPreview({
+  directions,
+  apiKey,
+}: {
+  directions: DirectionsOutput;
+  apiKey?: string;
+}) {
+  return (
+    <section className="maps-preview inline-directions" aria-label="Directions preview">
+      <div className="maps-preview-header">
+        <div>
+          <span>Directions</span>
+          <p>
+            {directions.origin?.name ?? "Origin"} → {directions.destination?.name ?? "Destination"}
+          </p>
+        </div>
+        {directions.distanceKm !== undefined && (
+          <strong>
+            {directions.distanceKm} km · {directions.durationMinutes} min
+          </strong>
+        )}
+      </div>
+      {apiKey && directions.origin && directions.destination ? (
+        <iframe
+          title="Google Maps directions"
+          loading="lazy"
+          referrerPolicy="no-referrer-when-downgrade"
+          src={buildGoogleMapsEmbedUrl(apiKey, directions)}
+        />
+      ) : (
+        <p className="maps-help">
+          Add <code>VITE_GOOGLE_MAPS_API_KEY</code> to embed the map here.
+        </p>
+      )}
+      {directions.googleMapsUrl && (
+        <a href={directions.googleMapsUrl} target="_blank" rel="noreferrer">
+          Open in Google Maps ↗
+        </a>
+      )}
+    </section>
+  );
+}
+
 function App() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [draft, setDraft] = useState("");
   const [isSending, setIsSending] = useState(false);
+  const [contextMetadata, setContextMetadata] =
+    useState<ContextMetadata | null>(null);
+  const [retrievalMetadata, setRetrievalMetadata] =
+    useState<RetrievalMetadata | null>(null);
+  const [agentMetadata, setAgentMetadata] = useState<AgentMetadata | null>(null);
+  const [userId, setUserId] = useState("local-user");
+  const [memoryContent, setMemoryContent] = useState("");
+  const [memoryType, setMemoryType] = useState<MemoryType>("preference");
+  const [memoryImportance, setMemoryImportance] = useState("0.8");
+  const [memoryStatus, setMemoryStatus] = useState<string | null>(null);
+  const [isSavingMemory, setIsSavingMemory] = useState(false);
+  const [isMemoryDrawerOpen, setIsMemoryDrawerOpen] = useState(false);
+  const [conversationId, setConversationId] = useState<string | null>(null);
+  const [conversationRecords, setConversationRecords] = useState<Conversation[]>([]);
+  const [isLoadingConversations, setIsLoadingConversations] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  const [isLoadingMemories, setIsLoadingMemories] = useState(false);
+  const [memoryRecords, setMemoryRecords] = useState<MemoryRecord[]>([]);
+  const [memoryPanelError, setMemoryPanelError] = useState<string | null>(null);
+  const [currentLocation, setCurrentLocation] = useState<CurrentLocation | null>(null);
+  const [locationStatus, setLocationStatus] = useState("Location not shared");
+  const directionsOutput = getDirectionsOutput(agentMetadata);
+  const googleMapsApiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY as string | undefined;
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
 
@@ -39,6 +209,18 @@ function App() {
   async function sendMessage(content: string, addUserMessage = true) {
     const trimmedContent = content.trim();
     if (!trimmedContent || isSending) return;
+
+    const conversation = [
+      ...messages
+        .filter((message) => !message.pending && !message.error)
+        .map(({ role, content: messageContent }) => ({
+          role,
+          content: messageContent,
+        })),
+      ...(addUserMessage
+        ? [{ role: "user" as const, content: trimmedContent }]
+        : []),
+    ];
 
     if (addUserMessage) {
       setMessages((current) => [
@@ -64,21 +246,39 @@ function App() {
       const result = await fetch(apiBaseUrl + "/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: trimmedContent }),
+        body: JSON.stringify({
+          messages: conversation,
+          userId,
+          conversationId,
+          currentLocation,
+        }),
       });
-      const data = await result.json();
+      const data = (await result.json()) as {
+        text?: string;
+        error?: string;
+        context?: ContextMetadata;
+        retrieval?: RetrievalMetadata;
+        agent?: AgentMetadata;
+        conversationId?: string;
+      };
 
       if (!result.ok) {
         throw new Error(data.error ?? "The assistant could not respond.");
       }
 
+      setContextMetadata(data.context ?? null);
+      setRetrievalMetadata(data.retrieval ?? null);
+      setAgentMetadata(data.agent ?? null);
+      setConversationId(data.conversationId ?? conversationId);
+
       setMessages((current) =>
         current.map((message) =>
           message.id === assistantId
-            ? { ...message, content: data.text, pending: false }
+            ? { ...message, content: data.text ?? "", pending: false }
             : message,
         ),
       );
+      if (isMemoryDrawerOpen) void loadConversations();
     } catch (error) {
       setMessages((current) =>
         current.map((message) =>
@@ -122,17 +322,164 @@ function App() {
 
   function startNewChat() {
     setMessages([]);
+    setConversationId(null);
     setDraft("");
+    setContextMetadata(null);
+    setRetrievalMetadata(null);
+    setAgentMetadata(null);
     composerRef.current?.focus();
+  }
+
+  async function saveMemory(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const content = memoryContent.trim();
+    const importance = Number(memoryImportance);
+
+    if (!content || !Number.isFinite(importance)) return;
+
+    setIsSavingMemory(true);
+    setMemoryStatus(null);
+
+    try {
+      const result = await fetch(apiBaseUrl + "/memories", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          userId,
+          content,
+          type: memoryType,
+          importance,
+        }),
+      });
+      const data = (await result.json()) as {
+        error?: string;
+        memory?: { id: string };
+      };
+
+      if (!result.ok) {
+        throw new Error(data.error ?? "The memory could not be saved.");
+      }
+
+      setMemoryContent("");
+      setMemoryStatus(`Saved ${data.memory?.id ?? "memory"}.`);
+      await loadMemories();
+    } catch (error) {
+      setMemoryStatus(
+        error instanceof Error ? error.message : "The memory could not be saved.",
+      );
+    } finally {
+      setIsSavingMemory(false);
+    }
+  }
+
+  async function loadMemories() {
+    setIsLoadingMemories(true);
+    setMemoryPanelError(null);
+
+    try {
+      const result = await fetch(`${apiBaseUrl}/memories?userId=${encodeURIComponent(userId)}`);
+      const data = (await result.json()) as { memories?: MemoryRecord[]; error?: string };
+      if (!result.ok) throw new Error(data.error ?? "Memories could not be loaded.");
+      setMemoryRecords(data.memories ?? []);
+    } catch (error) {
+      setMemoryPanelError(error instanceof Error ? error.message : "Memories could not be loaded.");
+    } finally {
+      setIsLoadingMemories(false);
+    }
+  }
+
+  async function loadConversations() {
+    setIsLoadingConversations(true);
+    setHistoryError(null);
+
+    try {
+      const result = await fetch(`${apiBaseUrl}/conversations?userId=${encodeURIComponent(userId)}`);
+      const data = (await result.json()) as { conversations?: Conversation[]; error?: string };
+      if (!result.ok) throw new Error(data.error ?? "Chat history could not be loaded.");
+      setConversationRecords(data.conversations ?? []);
+    } catch (error) {
+      setHistoryError(error instanceof Error ? error.message : "Chat history could not be loaded.");
+    } finally {
+      setIsLoadingConversations(false);
+    }
+  }
+
+  async function openConversation(record: Conversation) {
+    setHistoryError(null);
+    try {
+      const result = await fetch(
+        `${apiBaseUrl}/conversations/${encodeURIComponent(record.id)}/messages?userId=${encodeURIComponent(userId)}`,
+      );
+      const data = (await result.json()) as {
+        messages?: Array<{ id: string; role: "user" | "assistant"; content: string }>;
+        error?: string;
+      };
+      if (!result.ok) throw new Error(data.error ?? "Chat could not be opened.");
+      setConversationId(record.id);
+      setMessages(
+        (data.messages ?? []).map((message) => ({
+          id: message.id,
+          role: message.role,
+          content: message.content,
+        })),
+      );
+      setContextMetadata(null);
+      setRetrievalMetadata(null);
+      setAgentMetadata(null);
+      setIsMemoryDrawerOpen(false);
+      composerRef.current?.focus();
+    } catch (error) {
+      setHistoryError(error instanceof Error ? error.message : "Chat could not be opened.");
+    }
+  }
+
+  function toggleMemoryDrawer() {
+    const nextOpen = !isMemoryDrawerOpen;
+    setIsMemoryDrawerOpen(nextOpen);
+    if (nextOpen) {
+      void loadMemories();
+      void loadConversations();
+    }
   }
 
   async function copyMessage(content: string) {
     await navigator.clipboard.writeText(content);
   }
 
+  function requestCurrentLocation() {
+    if (!navigator.geolocation) {
+      setLocationStatus("Location is not supported by this browser");
+      return;
+    }
+
+    setLocationStatus("Requesting permission…");
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        setCurrentLocation({
+          latitude: position.coords.latitude,
+          longitude: position.coords.longitude,
+        });
+        setLocationStatus("Location ready for this chat");
+      },
+      () => setLocationStatus("Location permission was not granted"),
+      { enableHighAccuracy: false, maximumAge: 300_000, timeout: 10_000 },
+    );
+  }
+
   return (
     <main className="chat-shell">
       <header className="app-header">
+        <button
+          className="memory-drawer-button hamburger-button"
+          type="button"
+          onClick={toggleMemoryDrawer}
+          aria-label={isMemoryDrawerOpen ? "Close feature menu" : "Open feature menu"}
+          aria-expanded={isMemoryDrawerOpen}
+        >
+          <span aria-hidden="true" />
+          <span aria-hidden="true" />
+          <span aria-hidden="true" />
+        </button>
         <div className="brand">
           <span className="brand-mark">AI</span>
           <div>
@@ -145,6 +492,110 @@ function App() {
           New chat
         </button>
       </header>
+
+      {isMemoryDrawerOpen && (
+        <aside className="memory-drawer" aria-label="Learning features">
+          <div className="memory-drawer-header">
+            <div>
+              <p className="eyebrow">LEARNING LAB</p>
+              <h2>Agent features</h2>
+            </div>
+            <button type="button" onClick={toggleMemoryDrawer} aria-label="Close memory explorer">×</button>
+          </div>
+          <nav className="feature-menu" aria-label="Agent features menu">
+            <button type="button" onClick={() => document.getElementById("chat-history")?.scrollIntoView({ behavior: "smooth" })}>
+              <span>Chat threads</span><small>{conversationRecords.length}</small>
+            </button>
+            <button type="button" onClick={() => document.getElementById("short-term-memory")?.scrollIntoView({ behavior: "smooth" })}>
+              <span>Short-term memory</span><small>{messages.filter((message) => !message.pending && !message.error).length}</small>
+            </button>
+            <button type="button" onClick={() => document.getElementById("semantic-memory")?.scrollIntoView({ behavior: "smooth" })}>
+              <span>Long-term semantic memory</span><small>{memoryRecords.length}</small>
+            </button>
+            <button type="button" onClick={() => document.getElementById("context-window")?.scrollIntoView({ behavior: "smooth" })}>
+              <span>Context window</span><small>{contextMetadata ? "Ready" : "—"}</small>
+            </button>
+            <button type="button" onClick={() => document.getElementById("agent-execution")?.scrollIntoView({ behavior: "smooth" })}>
+              <span>Agent loop & tools</span><small>{agentMetadata ? agentMetadata.toolCalls : "—"}</small>
+            </button>
+          </nav>
+          <section id="chat-history" className="memory-layer">
+            <div className="memory-layer-header">
+              <div>
+                <h3>Chat history</h3>
+                <p>Exact conversations saved in the configured history store.</p>
+              </div>
+              <strong>{conversationRecords.length}</strong>
+            </div>
+            {historyError && <p className="memory-panel-error">{historyError}</p>}
+            {isLoadingConversations && <p className="memory-empty">Loading chats…</p>}
+            {!isLoadingConversations && conversationRecords.length === 0 && !historyError && (
+              <p className="memory-empty">No previous chats yet.</p>
+            )}
+            <div className="conversation-history-list">
+              {conversationRecords.map((conversation) => (
+                <button
+                  key={conversation.id}
+                  type="button"
+                  className={"conversation-history-item" + (conversation.id === conversationId ? " is-active" : "")}
+                  onClick={() => void openConversation(conversation)}
+                >
+                  <strong>{conversation.title}</strong>
+                  <small>{new Date(conversation.updatedAt).toLocaleString()}</small>
+                </button>
+              ))}
+            </div>
+          </section>
+          <section id="short-term-memory" className="memory-layer">
+            <div className="memory-layer-header">
+              <div>
+                <h3>Short-term memory</h3>
+                <p>Current conversation sent with each model request.</p>
+              </div>
+              <strong>{messages.filter((message) => !message.pending && !message.error).length}</strong>
+            </div>
+            {messages.length === 0 ? (
+              <p className="memory-empty">No messages in this chat yet.</p>
+            ) : (
+              <ol className="short-term-list">
+                {messages.filter((message) => !message.pending && !message.error).map((message) => (
+                  <li key={message.id}>
+                    <span>{message.role}</span>
+                    <p>{message.content}</p>
+                  </li>
+                ))}
+              </ol>
+            )}
+          </section>
+          <section id="semantic-memory" className="memory-layer">
+            <div className="memory-layer-header">
+              <div>
+                <h3>Long-term semantic memory</h3>
+                <p>Records stored with embeddings in the configured vector store.</p>
+              </div>
+              <button type="button" onClick={() => void loadMemories()} disabled={isLoadingMemories}>
+                {isLoadingMemories ? "…" : "Refresh"}
+              </button>
+            </div>
+            {memoryPanelError && <p className="memory-panel-error">{memoryPanelError}</p>}
+            {!isLoadingMemories && memoryRecords.length === 0 && !memoryPanelError && (
+              <p className="memory-empty">No saved memories for {userId}.</p>
+            )}
+            <div className="memory-record-list">
+              {memoryRecords.map((memory) => (
+                <article key={memory.id} className="memory-record">
+                  <div>
+                    <span className="memory-record-type">{memory.type}</span>
+                    <span className="memory-record-importance">importance {memory.importance}</span>
+                  </div>
+                  <p>{memory.content}</p>
+                  <small>{new Date(memory.updatedAt).toLocaleString()}</small>
+                </article>
+              ))}
+            </div>
+          </section>
+        </aside>
+      )}
 
       <section className="conversation" aria-live="polite">
         {messages.length === 0 ? (
@@ -217,7 +668,153 @@ function App() {
             <div ref={messagesEndRef} />
           </div>
         )}
+        {directionsOutput && (
+          <DirectionsPreview directions={directionsOutput} apiKey={googleMapsApiKey} />
+        )}
       </section>
+
+      <details className="memory-panel">
+        <summary>
+          <span>Long-term memory</span>
+          <span className="memory-panel-hint">Write explicitly · retrieve automatically</span>
+        </summary>
+        <form className="memory-form" onSubmit={saveMemory}>
+          <label>
+            User scope
+            <input value={userId} onChange={(event) => setUserId(event.target.value)} />
+          </label>
+          <label>
+            Memory
+            <textarea
+              value={memoryContent}
+              onChange={(event) => setMemoryContent(event.target.value)}
+              placeholder="The user prefers TypeScript."
+              rows={2}
+            />
+          </label>
+          <div className="memory-form-row">
+            <label>
+              Type
+              <select value={memoryType} onChange={(event) => setMemoryType(event.target.value as MemoryType)}>
+                <option value="fact">Fact</option>
+                <option value="preference">Preference</option>
+                <option value="project">Project</option>
+              </select>
+            </label>
+            <label>
+              Importance
+              <input
+                type="number"
+                min="0"
+                max="1"
+                step="0.1"
+                value={memoryImportance}
+                onChange={(event) => setMemoryImportance(event.target.value)}
+              />
+            </label>
+            <button className="memory-save-button" type="submit" disabled={isSavingMemory || !memoryContent.trim()}>
+              {isSavingMemory ? "Saving…" : "Save memory"}
+            </button>
+          </div>
+          <p className="memory-help">Memories are explicit in this lesson. They are embedded and stored in memory for this backend process.</p>
+          {memoryStatus && <p className="memory-status">{memoryStatus}</p>}
+        </form>
+      </details>
+
+      {contextMetadata && (
+        <details id="context-window" className="context-inspector" open>
+          <summary>
+            <span>Context window</span>
+            <span
+              className={
+                "context-badge" +
+                (contextMetadata.wasTruncated ? " is-truncated" : "")
+              }
+            >
+              {contextMetadata.wasTruncated ? "Truncated" : "Within budget"}
+            </span>
+          </summary>
+          <div className="context-grid">
+            <div>
+              <span>Context window</span>
+              <strong>{contextMetadata.contextWindowTokens} tokens</strong>
+            </div>
+            <div>
+              <span>Reserved output</span>
+              <strong>{contextMetadata.maxOutputTokens} tokens</strong>
+            </div>
+            <div>
+              <span>Safety margin</span>
+              <strong>
+                {contextMetadata.contextSafetyMarginTokens} tokens
+              </strong>
+            </div>
+            <div>
+              <span>Estimated input</span>
+              <strong>{contextMetadata.estimatedInputTokens} tokens</strong>
+            </div>
+            <div>
+              <span>Available budget</span>
+              <strong>{contextMetadata.availableInputTokens} tokens</strong>
+            </div>
+            <div>
+              <span>Messages sent</span>
+              <strong>
+                {contextMetadata.sentMessages} / {contextMetadata.receivedMessages}
+              </strong>
+            </div>
+            <div>
+              <span>Remaining input</span>
+              <strong>{contextMetadata.remainingInputTokens} tokens</strong>
+            </div>
+            <div>
+              <span>Dropped messages</span>
+              <strong>{contextMetadata.droppedMessages}</strong>
+            </div>
+            <div>
+              <span>Strategy</span>
+              <strong>{contextMetadata.strategy}</strong>
+            </div>
+            <div>
+              <span>Estimator</span>
+              <strong>{contextMetadata.estimator}</strong>
+            </div>
+          </div>
+          {retrievalMetadata && (
+            <div className="retrieval-summary">
+              <span>Memory retrieval</span>
+              <strong>
+                {retrievalMetadata.resultCount > 0
+                  ? `${retrievalMetadata.resultCount} match${retrievalMetadata.resultCount === 1 ? "" : "es"}`
+                  : retrievalMetadata.reason.replaceAll("_", " ")}
+              </strong>
+            </div>
+          )}
+          {agentMetadata && (
+            <div id="agent-execution" className="agent-summary">
+              <div className="agent-summary-header">
+                <span>Agent execution</span>
+                <strong>
+                  {agentMetadata.iterations} iteration{agentMetadata.iterations === 1 ? "" : "s"}
+                  {agentMetadata.toolCalls > 0
+                    ? ` · ${agentMetadata.toolCalls} tool call${agentMetadata.toolCalls === 1 ? "" : "s"}`
+                    : " · no tools used"}
+                </strong>
+              </div>
+              <ol className="agent-events">
+                {agentMetadata.events
+                  .filter((event) => event.type !== "iteration_started")
+                  .map((event, index) => (
+                    <li key={`${event.type}-${index}`}>
+                      <span>{formatAgentEvent(event)}</span>
+                      {event.name && <code>{event.name}</code>}
+                    </li>
+                  ))}
+              </ol>
+            </div>
+          )}
+        </details>
+      )}
 
       <form className="composer" onSubmit={submitMessage}>
         <textarea
@@ -233,6 +830,14 @@ function App() {
         <div className="composer-footer">
           <span>Enter to send · Shift + Enter for a new line</span>
           <button
+            className="location-button"
+            type="button"
+            onClick={requestCurrentLocation}
+            aria-label="Share current location"
+          >
+            {currentLocation ? "Location ready" : "Use current location"}
+          </button>
+          <button
             className="send-button"
             type="submit"
             disabled={isSending || !draft.trim()}
@@ -241,6 +846,7 @@ function App() {
             {isSending ? "..." : "↑"}
           </button>
         </div>
+        <p className="location-status" aria-live="polite">{locationStatus}</p>
       </form>
     </main>
   );
