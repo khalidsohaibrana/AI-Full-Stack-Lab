@@ -34,6 +34,17 @@ type ContextMetadata = {
   droppedTokens: number;
 };
 
+type RetrievalMetadata = {
+  enabled: boolean;
+  reason: string;
+  userId: string;
+  query: string;
+  resultCount: number;
+  results: Array<{ memoryId: string; similarity: number }>;
+};
+
+type MemoryType = "fact" | "preference" | "project";
+
 const starterPrompts = [
   "Explain what an AI agent is",
   "What is the Node.js event loop?",
@@ -50,6 +61,14 @@ function App() {
   const [isSending, setIsSending] = useState(false);
   const [contextMetadata, setContextMetadata] =
     useState<ContextMetadata | null>(null);
+  const [retrievalMetadata, setRetrievalMetadata] =
+    useState<RetrievalMetadata | null>(null);
+  const [userId, setUserId] = useState("local-user");
+  const [memoryContent, setMemoryContent] = useState("");
+  const [memoryType, setMemoryType] = useState<MemoryType>("preference");
+  const [memoryImportance, setMemoryImportance] = useState("0.8");
+  const [memoryStatus, setMemoryStatus] = useState<string | null>(null);
+  const [isSavingMemory, setIsSavingMemory] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
 
@@ -97,12 +116,13 @@ function App() {
       const result = await fetch(apiBaseUrl + "/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: conversation }),
+        body: JSON.stringify({ messages: conversation, userId }),
       });
       const data = (await result.json()) as {
         text?: string;
         error?: string;
         context?: ContextMetadata;
+        retrieval?: RetrievalMetadata;
       };
 
       if (!result.ok) {
@@ -110,6 +130,7 @@ function App() {
       }
 
       setContextMetadata(data.context ?? null);
+      setRetrievalMetadata(data.retrieval ?? null);
 
       setMessages((current) =>
         current.map((message) =>
@@ -163,7 +184,49 @@ function App() {
     setMessages([]);
     setDraft("");
     setContextMetadata(null);
+    setRetrievalMetadata(null);
     composerRef.current?.focus();
+  }
+
+  async function saveMemory(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const content = memoryContent.trim();
+    const importance = Number(memoryImportance);
+
+    if (!content || !Number.isFinite(importance)) return;
+
+    setIsSavingMemory(true);
+    setMemoryStatus(null);
+
+    try {
+      const result = await fetch(apiBaseUrl + "/memories", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          userId,
+          content,
+          type: memoryType,
+          importance,
+        }),
+      });
+      const data = (await result.json()) as {
+        error?: string;
+        memory?: { id: string };
+      };
+
+      if (!result.ok) {
+        throw new Error(data.error ?? "The memory could not be saved.");
+      }
+
+      setMemoryContent("");
+      setMemoryStatus(`Saved ${data.memory?.id ?? "memory"}.`);
+    } catch (error) {
+      setMemoryStatus(
+        error instanceof Error ? error.message : "The memory could not be saved.",
+      );
+    } finally {
+      setIsSavingMemory(false);
+    }
   }
 
   async function copyMessage(content: string) {
@@ -259,6 +322,54 @@ function App() {
         )}
       </section>
 
+      <details className="memory-panel">
+        <summary>
+          <span>Long-term memory</span>
+          <span className="memory-panel-hint">Write explicitly · retrieve automatically</span>
+        </summary>
+        <form className="memory-form" onSubmit={saveMemory}>
+          <label>
+            User scope
+            <input value={userId} onChange={(event) => setUserId(event.target.value)} />
+          </label>
+          <label>
+            Memory
+            <textarea
+              value={memoryContent}
+              onChange={(event) => setMemoryContent(event.target.value)}
+              placeholder="The user prefers TypeScript."
+              rows={2}
+            />
+          </label>
+          <div className="memory-form-row">
+            <label>
+              Type
+              <select value={memoryType} onChange={(event) => setMemoryType(event.target.value as MemoryType)}>
+                <option value="fact">Fact</option>
+                <option value="preference">Preference</option>
+                <option value="project">Project</option>
+              </select>
+            </label>
+            <label>
+              Importance
+              <input
+                type="number"
+                min="0"
+                max="1"
+                step="0.1"
+                value={memoryImportance}
+                onChange={(event) => setMemoryImportance(event.target.value)}
+              />
+            </label>
+            <button className="memory-save-button" type="submit" disabled={isSavingMemory || !memoryContent.trim()}>
+              {isSavingMemory ? "Saving…" : "Save memory"}
+            </button>
+          </div>
+          <p className="memory-help">Memories are explicit in this lesson. They are embedded and stored in memory for this backend process.</p>
+          {memoryStatus && <p className="memory-status">{memoryStatus}</p>}
+        </form>
+      </details>
+
       {contextMetadata && (
         <details className="context-inspector" open>
           <summary>
@@ -318,6 +429,16 @@ function App() {
               <strong>{contextMetadata.estimator}</strong>
             </div>
           </div>
+          {retrievalMetadata && (
+            <div className="retrieval-summary">
+              <span>Memory retrieval</span>
+              <strong>
+                {retrievalMetadata.resultCount > 0
+                  ? `${retrievalMetadata.resultCount} match${retrievalMetadata.resultCount === 1 ? "" : "es"}`
+                  : retrievalMetadata.reason.replaceAll("_", " ")}
+              </strong>
+            </div>
+          )}
         </details>
       )}
 

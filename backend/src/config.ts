@@ -19,6 +19,27 @@ export type AppConfig = {
       messageOverheadTokens: number;
     };
   };
+  embedding: {
+    provider: string;
+    apiKey?: string;
+    baseUrl?: string;
+    model?: string;
+    dimensions?: number;
+    validationErrors: string[];
+  };
+  retrieval: {
+    enabled: boolean;
+    topK: number;
+    minSimilarity: number;
+    minImportance: number;
+    defaultUserId: string;
+    validationErrors: string[];
+  };
+  storage: {
+    provider: "in-memory" | "postgres";
+    databaseUrl?: string;
+    validationErrors: string[];
+  };
   validationErrors: string[];
 };
 
@@ -35,7 +56,21 @@ const defaults = {
   tokenEstimatorStrategy: "character-ratio" as const,
   charsPerToken: 4,
   messageOverheadTokens: 4,
+  storageProvider: "in-memory" as const,
 } as const;
+
+function readStorageProvider(
+  environment: Record<string, string | undefined>,
+  validationErrors: string[],
+): "in-memory" | "postgres" {
+  const value = environment.AI_MEMORY_STORE?.trim();
+
+  if (!value) return defaults.storageProvider;
+  if (value === "in-memory" || value === "postgres") return value;
+
+  validationErrors.push("AI_MEMORY_STORE must be either in-memory or postgres");
+  return defaults.storageProvider;
+}
 
 function readTokenEstimatorStrategy(
   environment: Record<string, string | undefined>,
@@ -120,10 +155,72 @@ function readNonNegativeInteger(
   return parsed;
 }
 
+function readOptionalPositiveInteger(
+  environment: Record<string, string | undefined>,
+  name: string,
+  validationErrors: string[],
+): number | undefined {
+  const value = environment[name]?.trim();
+
+  if (!value) return undefined;
+
+  const parsed = Number(value);
+
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    validationErrors.push(`${name} must be a positive integer when provided`);
+    return undefined;
+  }
+
+  return parsed;
+}
+
+function readBoolean(
+  environment: Record<string, string | undefined>,
+  name: string,
+  fallback: boolean,
+  validationErrors: string[],
+): boolean {
+  const value = environment[name]?.trim().toLowerCase();
+
+  if (!value) return fallback;
+  if (value === "true") return true;
+  if (value === "false") return false;
+
+  validationErrors.push(`${name} must be true or false`);
+  return fallback;
+}
+
+function readBoundedNumber(
+  environment: Record<string, string | undefined>,
+  name: string,
+  fallback: number,
+  minimum: number,
+  maximum: number,
+  validationErrors: string[],
+): number {
+  const value = environment[name]?.trim();
+
+  if (!value) return fallback;
+
+  const parsed = Number(value);
+
+  if (!Number.isFinite(parsed) || parsed < minimum || parsed > maximum) {
+    validationErrors.push(
+      `${name} must be a number between ${minimum} and ${maximum}`,
+    );
+    return fallback;
+  }
+
+  return parsed;
+}
+
 export function loadConfig(
   environment: Record<string, string | undefined> = process.env,
 ): AppConfig {
   const validationErrors: string[] = [];
+  const embeddingValidationErrors: string[] = [];
+  const retrievalValidationErrors: string[] = [];
+  const storageValidationErrors: string[] = [];
   const contextWindowTokens = readPositiveInteger(
     environment,
     "AI_CONTEXT_WINDOW_TOKENS",
@@ -154,6 +251,41 @@ export function loadConfig(
     defaults.messageOverheadTokens,
     validationErrors,
   );
+  const embeddingDimensions = readOptionalPositiveInteger(
+    environment,
+    "AI_EMBEDDING_DIMENSIONS",
+    embeddingValidationErrors,
+  );
+  const retrievalTopK = readPositiveInteger(
+    environment,
+    "AI_MEMORY_RETRIEVAL_TOP_K",
+    5,
+    retrievalValidationErrors,
+  );
+  const retrievalMinSimilarity = readBoundedNumber(
+    environment,
+    "AI_MEMORY_RETRIEVAL_MIN_SIMILARITY",
+    0.55,
+    -1,
+    1,
+    retrievalValidationErrors,
+  );
+  const retrievalMinImportance = readBoundedNumber(
+    environment,
+    "AI_MEMORY_RETRIEVAL_MIN_IMPORTANCE",
+    0,
+    0,
+    1,
+    retrievalValidationErrors,
+  );
+  const storageProvider = readStorageProvider(environment, storageValidationErrors);
+  const databaseUrl = environment.AI_MEMORY_DATABASE_URL?.trim() || undefined;
+
+  if (storageProvider === "postgres" && !databaseUrl) {
+    storageValidationErrors.push(
+      "AI_MEMORY_DATABASE_URL is required when AI_MEMORY_STORE is postgres",
+    );
+  }
 
   const availableInputTokens =
     contextWindowTokens - maxOutputTokens - contextSafetyMarginTokens;
@@ -197,6 +329,34 @@ export function loadConfig(
         charsPerToken,
         messageOverheadTokens,
       },
+    },
+    embedding: {
+      provider:
+        environment.AI_EMBEDDING_PROVIDER?.trim() || defaults.provider,
+      apiKey: environment.AI_EMBEDDING_API_KEY?.trim() || undefined,
+      baseUrl: environment.AI_EMBEDDING_BASE_URL?.trim() || undefined,
+      model: environment.AI_EMBEDDING_MODEL?.trim() || undefined,
+      dimensions: embeddingDimensions,
+      validationErrors: embeddingValidationErrors,
+    },
+    retrieval: {
+      enabled: readBoolean(
+        environment,
+        "AI_MEMORY_RETRIEVAL_ENABLED",
+        true,
+        retrievalValidationErrors,
+      ),
+      topK: retrievalTopK,
+      minSimilarity: retrievalMinSimilarity,
+      minImportance: retrievalMinImportance,
+      defaultUserId:
+        environment.AI_DEFAULT_USER_ID?.trim() || "local-user",
+      validationErrors: retrievalValidationErrors,
+    },
+    storage: {
+      provider: storageProvider,
+      databaseUrl,
+      validationErrors: storageValidationErrors,
     },
     validationErrors,
   };
