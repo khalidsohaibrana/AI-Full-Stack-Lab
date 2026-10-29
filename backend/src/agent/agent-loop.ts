@@ -26,13 +26,14 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
   const events: AgentEvent[] = [{ type: "started" }];
   options.onEvent?.({ type: "started" });
   let toolCallCount = 0;
+  let forceNoTools = false;
 
   for (let iteration = 1; iteration <= options.maxIterations; iteration += 1) {
     events.push({ type: "iteration_started", iteration });
     options.onEvent?.({ type: "iteration_started", iteration });
     const response = await options.complete({
       messages: [...messages],
-      tools: [...options.tools],
+      tools: forceNoTools ? [] : [...options.tools],
     });
 
     if (response.kind === "final") {
@@ -74,6 +75,13 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
         isError: result.isError === true,
         output: result.output,
       });
+      if (result.isError && isUnknownToolResult(result.output)) {
+        forceNoTools = true;
+        messages.push({
+          role: "system",
+          content: `The requested capability '${call.name}' is not available in this application. Answer the user's original question directly and clearly state that this capability is unavailable. Do not request another tool.`,
+        });
+      }
     }
   }
 
@@ -82,6 +90,15 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
   throw new AgentLoopError(
     `The agent exceeded the maximum of ${options.maxIterations} iterations.`,
     "max_iterations",
+  );
+}
+
+function isUnknownToolResult(output: unknown): boolean {
+  const error = output && typeof output === "object"
+    ? (output as Record<string, unknown>).error
+    : undefined;
+  return Boolean(
+    typeof error === "string" && error.startsWith("Unknown tool:"),
   );
 }
 

@@ -1,12 +1,23 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createExternalTools } from "./external-tools.js";
+import { createExternalTools, normalizeSearchQuery } from "./external-tools.js";
 
 const config = {
   geocodingBaseUrl: "https://example.test/geocode",
   weatherBaseUrl: "https://example.test/weather",
   routingBaseUrl: "https://example.test/router",
+  webSearchProvider: "bing-rss" as const,
+  webSearchBaseUrl: "https://example.test/search",
+  webSearchTimeoutMs: 1000,
+  webSearchMaxResults: 5,
 };
+
+test("normalizes long research prompts into focused search queries", () => {
+  assert.equal(
+    normalizeSearchQuery("Find the top 10 IT startups that received funding in October 2026. Include startup, amount, date, investors, and source URL."),
+    "IT startup funding October 2026 investors",
+  );
+});
 
 test("weather resolves a place and requests today's forecast", async () => {
   const originalFetch = globalThis.fetch;
@@ -79,4 +90,86 @@ test("current-location requests fail clearly without permission", async () => {
     () => weather.execute({ location: "current location" }, { userId: "test" }),
     /Current location is unavailable/,
   );
+});
+
+test("web search parses ranked RSS results and limits the result count", async () => {
+  const originalFetch = globalThis.fetch;
+  let requestedUrl = "";
+  globalThis.fetch = async (input) => {
+    requestedUrl = String(input);
+    return new Response(`<?xml version="1.0"?><rss><channel>
+      <item><title>First &amp; Best Result</title><link>https://example.com/first</link><description>First &lt;b&gt;snippet&lt;/b&gt;</description></item>
+      <item><title>Second Result</title><link>https://example.com/second</link><description>Second snippet</description></item>
+    </channel></rss>`, { headers: { "Content-Type": "application/rss+xml" } });
+  };
+
+  try {
+    const search = createExternalTools(config).find((tool) => tool.name === "web_search");
+    assert.ok(search);
+    const result = await search.execute({ query: "AI agents", maxResults: 1 }, { userId: "test" }) as {
+      provider: string;
+      resultCount: number;
+      results: Array<{ title: string; url: string; snippet: string; position: number }>;
+    };
+
+    assert.match(requestedUrl, /q=AI\+agents/);
+    assert.equal(result.provider, "bing-rss");
+    assert.equal(result.resultCount, 1);
+    assert.deepEqual(result.results[0], {
+      position: 1,
+      title: "First & Best Result",
+      url: "https://example.com/first",
+      snippet: "First snippet",
+      source: "example.com",
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Brave search sends the API key and normalizes citations", async () => {
+  const originalFetch = globalThis.fetch;
+  let requestedHeaders: HeadersInit | undefined;
+  globalThis.fetch = async (_input, init) => {
+    requestedHeaders = init?.headers;
+    return Response.json({ web: { results: [{ title: "Brave result", url: "https://example.com/result", description: "A result", profile: { long_name: "Example" } }] } });
+  };
+
+  try {
+    const search = createExternalTools({ ...config, webSearchProvider: "brave", webSearchApiKey: "secret", webSearchBaseUrl: "https://api.search.brave.com/res/v1/web/search" }).find((tool) => tool.name === "web_search");
+    assert.ok(search);
+    const result = await search.execute({ query: "latest AI", recencyDays: 7 }, { userId: "test" }) as { results: Array<{ source: string; url: string }> };
+
+    assert.equal((requestedHeaders as Record<string, string>)["X-Subscription-Token"], "secret");
+    assert.deepEqual(result.results, [{ position: 1, title: "Brave result", url: "https://example.com/result", snippet: "A result", source: "Example" }]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Brave preference falls back to Bing RSS when no API key is configured", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(`<?xml version="1.0"?><rss><channel>
+    <item><title>Fallback result</title><link>https://example.com/fallback</link><description>Fallback snippet</description></item>
+  </channel></rss>`, { headers: { "Content-Type": "application/rss+xml" } });
+
+  try {
+    const search = createExternalTools({
+      ...config,
+      webSearchProvider: "brave",
+      webSearchBaseUrl: "https://api.search.brave.com/res/v1/web/search",
+    }).find((tool) => tool.name === "web_search");
+    assert.ok(search);
+    const result = await search.execute(
+      { query: "latest IT startup funding", maxResults: "10", recencyDays: "0" },
+      { userId: "test" },
+    ) as { provider: string; providerFallback?: string; resultCount: number; results: Array<{ source: string }> };
+
+    assert.equal(result.provider, "google-news-rss");
+    assert.match(result.providerFallback ?? "", /AI_WEB_SEARCH_API_KEY/);
+    assert.equal(result.resultCount, 1);
+    assert.equal(result.results[0]?.source, "Google News");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });

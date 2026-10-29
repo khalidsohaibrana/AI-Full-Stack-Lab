@@ -26,6 +26,8 @@ type ChatResponse = {
   conversationId?: string;
   planning?: PlanningMetadata;
   parallel?: ParallelMetadata;
+  handoff?: HandoffMetadata;
+  supervisor?: SupervisorMetadata;
 };
 
 type Conversation = {
@@ -93,6 +95,13 @@ type ParallelMetadata = {
   workers?: Array<{ id: string; objective?: string; status: string; iterations: number; toolCalls: number; tools: string[]; error?: string }>;
 };
 
+type HandoffMetadata = {
+  enabled: boolean;
+  handoffs?: Array<{ type: string; request?: { id: string; fromAgent: string; toAgent: string; reason: string; task: string }; reason?: string; workerId?: string }>;
+  workers?: Array<{ id: string; handoffId: string; status: string; iterations: number; toolCalls: number; tools: string[] }>;
+};
+type SupervisorMetadata = { enabled: boolean; tasks?: Array<{ id: string; objective: string }>; events?: Array<{ type: string }>; workers?: Array<{ id: string; status: string; attempts: number; toolCalls: number; error?: string }> };
+
 type DirectionsOutput = {
   origin?: { name?: string; latitude?: number; longitude?: number };
   destination?: { name?: string; latitude?: number; longitude?: number };
@@ -149,6 +158,21 @@ function describeProgress(event: Record<string, unknown>): string {
   if (event.type === "planning_started") return "Creating an execution plan…";
   if (event.type === "planning_finished") return "Plan validated · starting tools";
   if (event.type === "parallel_orchestration_started" || event.type === "orchestrator_started") return "Orchestrator is splitting the task…";
+  if (event.type === "handoff_orchestration_started") return "Lead agent is preparing the first handoff…";
+  if (event.type === "handoff_requested") {
+    const request = event.request && typeof event.request === "object" ? event.request as Record<string, unknown> : {};
+    return `Handoff: ${String(request.fromAgent)} → ${String(request.toAgent)}`;
+  }
+  if (event.type === "handoff_accepted") return "Handoff accepted · specialist is working";
+  if (event.type === "handoff_rejected") return `Handoff rejected: ${String(event.reason ?? "unknown reason")}`;
+  if (event.type === "handoff_worker_event") {
+    const nested = event.event && typeof event.event === "object" ? event.event as Record<string, unknown> : {};
+    return `${String(event.workerId)} ${nested.type === "tool_selected" ? `is using ${String(nested.name)}…` : nested.type === "tool_completed" ? `completed ${String(nested.name)}` : "is working…"}`;
+  }
+  if (event.type === "supervisor_orchestration_started") return "Supervisor is assigning and monitoring workers…";
+  if (event.type === "worker_retrying") return "Supervisor is retrying a failed worker…";
+  if (event.type === "worker_escalated") return "Supervisor escalated a failed task";
+  if (event.type === "supervisor_finished") return "Supervisor completed its review";
   if (event.type === "tasks_created") return "Worker tasks ready · starting agents";
   if (event.type === "worker_progress") return `${String(event.id)} ${event.status === "rejected" ? "failed" : event.status === "fulfilled" ? "completed" : "started"}`;
   if (event.type === "worker_event") {
@@ -257,8 +281,12 @@ function App() {
   const [agentMetadata, setAgentMetadata] = useState<AgentMetadata | null>(null);
   const [planningMetadata, setPlanningMetadata] = useState<PlanningMetadata | null>(null);
   const [parallelMetadata, setParallelMetadata] = useState<ParallelMetadata | null>(null);
+  const [handoffMetadata, setHandoffMetadata] = useState<HandoffMetadata | null>(null);
+  const [supervisorMetadata, setSupervisorMetadata] = useState<SupervisorMetadata | null>(null);
   const [isPlanningEnabled, setIsPlanningEnabled] = useState(false);
   const [isParallelEnabled, setIsParallelEnabled] = useState(false);
+  const [isHandoffEnabled, setIsHandoffEnabled] = useState(false);
+  const [isSupervisorEnabled, setIsSupervisorEnabled] = useState(false);
   const [userId, setUserId] = useState("local-user");
   const [memoryContent, setMemoryContent] = useState("");
   const [memoryType, setMemoryType] = useState<MemoryType>("preference");
@@ -278,11 +306,16 @@ function App() {
   const directionsOutput = getDirectionsOutput(agentMetadata);
   const plannedToolCalls = planningMetadata?.steps?.filter((step) => step.status === "completed").length ?? 0;
   const parallelToolCalls = parallelMetadata?.workers?.reduce((total, worker) => total + worker.toolCalls, 0) ?? 0;
+  const handoffToolCalls = handoffMetadata?.workers?.reduce((total, worker) => total + worker.toolCalls, 0) ?? 0;
   const visibleToolCalls = planningMetadata?.enabled
     ? plannedToolCalls
     : parallelMetadata?.enabled
       ? parallelToolCalls
-      : agentMetadata?.toolCalls ?? 0;
+      : handoffMetadata?.enabled
+        ? handoffToolCalls
+        : supervisorMetadata?.enabled
+          ? supervisorMetadata.workers?.reduce((total, worker) => total + worker.toolCalls, 0) ?? 0
+          : agentMetadata?.toolCalls ?? 0;
   const googleMapsApiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY as string | undefined;
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
@@ -326,7 +359,14 @@ function App() {
       },
     ]);
     setIsSending(true);
-    setLiveStatus(isParallelEnabled ? "Starting parallel orchestration…" : isPlanningEnabled ? "Preparing the plan…" : "Agent is thinking…");
+    setContextMetadata(null);
+    setRetrievalMetadata(null);
+    setAgentMetadata(null);
+    setPlanningMetadata(null);
+    setParallelMetadata(null);
+    setHandoffMetadata(null);
+    setSupervisorMetadata(null);
+    setLiveStatus(isParallelEnabled ? "Starting parallel orchestration…" : isPlanningEnabled ? "Preparing the plan…" : isHandoffEnabled ? "Starting handoff workflow…" : isSupervisorEnabled ? "Starting supervisor workflow…" : "Agent is thinking…");
 
     try {
       const result = await fetch(apiBaseUrl + "/chat", {
@@ -338,6 +378,8 @@ function App() {
           conversationId,
           planning: isPlanningEnabled,
           parallel: isParallelEnabled,
+          handoff: isHandoffEnabled,
+          supervisor: isSupervisorEnabled,
           stream: true,
           currentLocation,
         }),
@@ -379,6 +421,8 @@ function App() {
       setAgentMetadata(data.agent ?? null);
       setPlanningMetadata(data.planning ?? null);
       setParallelMetadata(data.parallel ?? null);
+      setHandoffMetadata(data.handoff ?? null);
+      setSupervisorMetadata(data.supervisor ?? null);
       setConversationId(data.conversationId ?? conversationId);
 
       setMessages((current) =>
@@ -970,6 +1014,39 @@ function App() {
               </ol>
             </div>
           )}
+          {handoffMetadata?.enabled && (
+            <div className="planning-summary">
+              <div className="agent-summary-header">
+                <span>Agent handoff workflow</span>
+                <strong>{handoffMetadata.workers?.length ?? 0} specialists</strong>
+              </div>
+              <ol className="planning-steps">
+                {handoffMetadata.handoffs?.filter((event) => event.type !== "handoff_worker_event").map((event, index) => {
+                  const request = event.request;
+                  const label = request ? `${request.fromAgent} → ${request.toAgent}` : event.type.replaceAll("_", " ");
+                  return (
+                    <li key={`${event.type}-${index}`} className={event.type === "handoff_accepted" ? "completed" : event.type === "handoff_rejected" ? "failed" : ""}>
+                      <span>{event.type === "handoff_accepted" ? "✓" : event.type === "handoff_rejected" ? "!" : "·"}</span>
+                      <div><strong>{label}</strong><small>{event.reason ?? request?.task ?? event.type.replaceAll("_", " ")}</small></div>
+                    </li>
+                  );
+                })}
+              </ol>
+            </div>
+          )}
+          {supervisorMetadata?.enabled && (
+            <div className="planning-summary">
+              <div className="agent-summary-header"><span>Supervisor workflow</span><strong>{supervisorMetadata.workers?.length ?? 0} tasks</strong></div>
+              <ol className="planning-steps">
+                {supervisorMetadata.workers?.map((worker) => (
+                  <li key={worker.id} className={worker.status === "completed" ? "completed" : "failed"}>
+                    <span>{worker.status === "completed" ? "✓" : "!"}</span>
+                    <div><strong>{worker.id} · {worker.status}</strong><small>{worker.attempts} attempt{worker.attempts === 1 ? "" : "s"} · {worker.toolCalls} tool calls{worker.error ? ` · ${worker.error}` : ""}</small></div>
+                  </li>
+                ))}
+              </ol>
+            </div>
+          )}
         </details>
       )}
 
@@ -999,7 +1076,7 @@ function App() {
             type="button"
             onClick={() => setIsPlanningEnabled((enabled) => !enabled)}
             aria-pressed={isPlanningEnabled}
-            disabled={isParallelEnabled}
+            disabled={isParallelEnabled || isHandoffEnabled}
           >
             {isPlanningEnabled ? "Plan first" : "Direct loop"}
           </button>
@@ -1009,10 +1086,38 @@ function App() {
             onClick={() => {
               setIsParallelEnabled((enabled) => !enabled);
               setIsPlanningEnabled(false);
+              setIsHandoffEnabled(false);
+              setIsSupervisorEnabled(false);
             }}
             aria-pressed={isParallelEnabled}
           >
             Parallel agents
+          </button>
+          <button
+            className={"location-button planning-toggle" + (isHandoffEnabled ? " is-active" : "")}
+            type="button"
+            onClick={() => {
+              setIsHandoffEnabled((enabled) => !enabled);
+              setIsPlanningEnabled(false);
+              setIsParallelEnabled(false);
+              setIsSupervisorEnabled(false);
+            }}
+            aria-pressed={isHandoffEnabled}
+          >
+            Handoff agents
+          </button>
+          <button
+            className={"location-button planning-toggle" + (isSupervisorEnabled ? " is-active" : "")}
+            type="button"
+            onClick={() => {
+              setIsSupervisorEnabled((enabled) => !enabled);
+              setIsPlanningEnabled(false);
+              setIsParallelEnabled(false);
+              setIsHandoffEnabled(false);
+            }}
+            aria-pressed={isSupervisorEnabled}
+          >
+            Supervisor
           </button>
           <button
             className="send-button"

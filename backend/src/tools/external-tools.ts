@@ -32,18 +32,198 @@ type RoutingResponse = {
   routes?: Array<{ distance: number; duration: number }>;
 };
 
+type BraveSearchResponse = {
+  web?: {
+    results?: Array<{
+      title?: string;
+      url?: string;
+      description?: string;
+      profile?: { long_name?: string };
+    }>;
+  };
+};
+
 type ExternalToolConfig = {
   geocodingBaseUrl: string;
   weatherBaseUrl: string;
   routingBaseUrl: string;
+  webSearchProvider: "brave" | "bing-rss";
+  webSearchApiKey?: string;
+  webSearchBaseUrl: string;
+  webSearchTimeoutMs: number;
+  webSearchMaxResults: number;
 };
 
 export function createExternalTools(config: ExternalToolConfig): Tool[] {
   return [
     createWeatherTool(config),
     createDirectionsTool(config),
+    createWebSearchTool(config),
   ];
 }
+
+function createWebSearchTool(config: ExternalToolConfig): Tool {
+  return {
+    name: "web_search",
+    description: "Search the live web for current information and return concise cited results. Use this for recent facts, unfamiliar topics, and explicit web-search requests.",
+    parameters: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "A focused web search query." },
+        maxResults: { type: "integer", minimum: 1, maximum: 10, description: "Maximum number of results, default 5." },
+        recencyDays: { type: "integer", minimum: 1, maximum: 3650, description: "Optional freshness window in days." },
+      },
+      required: ["query"],
+      additionalProperties: false,
+    },
+    async execute(argumentsValue) {
+      const query = normalizeSearchQuery(readStringArgument(argumentsValue, "query"));
+      const requestedMaxResults = readOptionalNumberArgument(argumentsValue, "maxResults");
+      const maxResults = Math.min(
+        10,
+        Math.max(1, Math.floor(requestedMaxResults ?? config.webSearchMaxResults)),
+      );
+      const recencyDays = readOptionalNumberArgument(argumentsValue, "recencyDays");
+      const useBrave = config.webSearchProvider === "brave" && Boolean(config.webSearchApiKey);
+      const useGoogleNews = !useBrave && isNewsSearchQuery(query);
+      const results = useBrave
+        ? await searchBrave(query, maxResults, recencyDays, config)
+        : useGoogleNews
+          ? await searchGoogleNewsRss(query, maxResults, config)
+          : await searchBingRss(query, maxResults, config);
+      return {
+        query,
+        provider: useBrave ? "brave" : useGoogleNews ? "google-news-rss" : "bing-rss",
+        providerFallback: config.webSearchProvider === "brave" && !config.webSearchApiKey
+          ? `Brave is configured as preferred, but AI_WEB_SEARCH_API_KEY is missing; used ${useGoogleNews ? "Google News RSS" : "Bing RSS"} instead.`
+          : undefined,
+        resultCount: results.length,
+        results,
+        searchedAt: new Date().toISOString(),
+        usageGuidance: "Use the result title, URL, and snippet as citations. Verify important claims against the linked source.",
+      };
+    },
+  };
+}
+
+export function normalizeSearchQuery(input: string): string {
+  const query = input.replace(/\s+/gu, " ").trim();
+  const fundingMatch = query.match(/\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+(20\d{2})\b/iu);
+  if (/\b(startups?|start-ups?|funding|funded|investment|venture)\b/iu.test(query) && fundingMatch) {
+    return `IT startup funding ${fundingMatch[1]} ${fundingMatch[2]} investors`;
+  }
+
+  if (/\b(marketplace|used car|used cars|vehicle|listing|listings)\b/iu.test(query)) {
+    const location = query.match(/\b(?:in|near)\s+([A-Za-z][A-Za-z .'-]{2,40}?)(?:[?.!,]|$)/iu)?.[1]?.trim();
+    const model = query.match(/\b(?:used\s+)?([A-Za-z][A-Za-z0-9-]*\s+[A-Za-z][A-Za-z0-9-]*(?:\s+\d{4})?)\b/iu)?.[1]?.trim();
+    if (model) return `${model}${location ? ` ${location}` : ""}`;
+  }
+
+  return query.length > 240 ? query.slice(0, 240) : query;
+}
+
+async function searchBrave(
+  query: string,
+  maxResults: number,
+  recencyDays: number | undefined,
+  config: ExternalToolConfig,
+): Promise<WebSearchResult[]> {
+  if (!config.webSearchApiKey) {
+    throw new Error("Brave web search requires AI_WEB_SEARCH_API_KEY.");
+  }
+  const url = new URL(config.webSearchBaseUrl);
+  url.searchParams.set("q", query);
+  url.searchParams.set("count", String(maxResults));
+  if (recencyDays !== undefined && recencyDays > 0) {
+    url.searchParams.set("freshness", `pd${Math.min(3650, Math.floor(recencyDays))}`);
+  }
+  const data = await fetchJson<BraveSearchResponse>(url, {
+    headers: { "X-Subscription-Token": config.webSearchApiKey, Accept: "application/json" },
+    timeoutMs: config.webSearchTimeoutMs,
+  });
+  return (data.web?.results ?? [])
+    .filter((result) => typeof result.title === "string" && typeof result.url === "string")
+    .slice(0, maxResults)
+    .map((result, index) => ({
+      position: index + 1,
+      title: result.title!,
+      url: result.url!,
+      snippet: stripMarkup(result.description ?? ""),
+      source: result.profile?.long_name ?? new URL(result.url!).hostname,
+    }));
+}
+
+async function searchBingRss(
+  query: string,
+  maxResults: number,
+  config: ExternalToolConfig,
+): Promise<WebSearchResult[]> {
+  const url = new URL(config.webSearchBaseUrl);
+  url.searchParams.set("q", query);
+  url.searchParams.set("format", "rss");
+  const xml = await fetchText(url, { timeoutMs: config.webSearchTimeoutMs });
+  const results: WebSearchResult[] = [];
+  const itemPattern = /<item>([\s\S]*?)<\/item>/giu;
+  for (const match of xml.matchAll(itemPattern)) {
+    const item = match[1] ?? "";
+    const title = readXmlTag(item, "title");
+    const link = readXmlTag(item, "link");
+    if (!title || !link) continue;
+    results.push({
+      position: results.length + 1,
+      title,
+      url: link,
+      snippet: readXmlTag(item, "description") ?? "",
+      source: (() => {
+        try { return new URL(link).hostname; } catch { return "Bing"; }
+      })(),
+    });
+    if (results.length >= maxResults) break;
+  }
+  return results;
+}
+
+async function searchGoogleNewsRss(
+  query: string,
+  maxResults: number,
+  config: ExternalToolConfig,
+): Promise<WebSearchResult[]> {
+  const url = new URL("https://news.google.com/rss/search");
+  url.searchParams.set("q", query);
+  url.searchParams.set("hl", "en-US");
+  url.searchParams.set("gl", "US");
+  url.searchParams.set("ceid", "US:en");
+  const xml = await fetchText(url, { timeoutMs: config.webSearchTimeoutMs });
+  const results: WebSearchResult[] = [];
+  const itemPattern = /<item>([\s\S]*?)<\/item>/giu;
+  for (const match of xml.matchAll(itemPattern)) {
+    const item = match[1] ?? "";
+    const title = readXmlTag(item, "title");
+    const link = readXmlTag(item, "link");
+    if (!title || !link) continue;
+    results.push({
+      position: results.length + 1,
+      title,
+      url: link,
+      snippet: readXmlTag(item, "description") ?? "",
+      source: readXmlTag(item, "source") ?? "Google News",
+    });
+    if (results.length >= maxResults) break;
+  }
+  return results;
+}
+
+function isNewsSearchQuery(query: string): boolean {
+  return /\b(startups?|start-ups?|funding|funded|investment|venture|financing|news)\b/iu.test(query);
+}
+
+type WebSearchResult = {
+  position: number;
+  title: string;
+  url: string;
+  snippet: string;
+  source: string;
+};
 
 function createWeatherTool(config: ExternalToolConfig): Tool {
   return {
@@ -216,10 +396,8 @@ async function resolveLocation(
   };
 }
 
-async function fetchJson<T>(url: URL): Promise<T> {
-  const response = await fetch(url, {
-    headers: { "User-Agent": "AI-Full-Stack-Lab-learning-app/0.1" },
-  });
+async function fetchJson<T>(url: URL, options: { headers?: Record<string, string>; timeoutMs?: number } = {}): Promise<T> {
+  const response = await fetchWithTimeout(url, options);
   if (!response.ok) {
     const detail = (await response.text()).slice(0, 300);
     throw new Error(
@@ -227,6 +405,74 @@ async function fetchJson<T>(url: URL): Promise<T> {
     );
   }
   return response.json() as Promise<T>;
+}
+
+async function fetchText(url: URL, options: { headers?: Record<string, string>; timeoutMs?: number } = {}): Promise<string> {
+  const response = await fetchWithTimeout(url, options);
+  if (!response.ok) {
+    const detail = (await response.text()).slice(0, 300);
+    throw new Error(
+      `External provider returned HTTP ${response.status} for ${url.toString()}${detail ? `: ${detail}` : "."}`,
+    );
+  }
+  return response.text();
+}
+
+async function fetchWithTimeout(
+  url: URL,
+  options: { headers?: Record<string, string>; timeoutMs?: number },
+): Promise<Response> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? 10_000);
+  try {
+    return await fetch(url, {
+      signal: controller.signal,
+      headers: {
+        "User-Agent": "AI-Full-Stack-Lab-learning-app/0.1",
+        ...options.headers,
+      },
+    });
+  } catch (error) {
+    if (controller.signal.aborted) {
+      throw new Error(`External provider timed out after ${options.timeoutMs ?? 10_000}ms.`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function readXmlTag(xml: string, tag: string): string | undefined {
+  const match = xml.match(new RegExp(`<${tag}(?:\\s[^>]*)?>([\\s\\S]*?)</${tag}>`, "i"));
+  return match?.[1]
+    ? stripMarkup(decodeHtmlEntities(match[1])).trim()
+    : undefined;
+}
+
+function stripMarkup(value: string): string {
+  return value.replace(/<[^>]*>/gu, "").replace(/\s+/gu, " ").trim();
+}
+
+function decodeHtmlEntities(value: string): string {
+  return value
+    .replace(/&amp;/gu, "&")
+    .replace(/&quot;/gu, '"')
+    .replace(/&#39;|&apos;/gu, "'")
+    .replace(/&lt;/gu, "<")
+    .replace(/&gt;/gu, ">");
+}
+
+function readOptionalNumberArgument(value: unknown, name: string): number | undefined {
+  if (!value || typeof value !== "object") throw new Error("Tool arguments must be an object.");
+  const result = (value as Record<string, unknown>)[name];
+  if (result === undefined) return undefined;
+  const numericResult = typeof result === "string" && result.trim() !== ""
+    ? Number(result)
+    : result;
+  if (typeof numericResult !== "number" || !Number.isFinite(numericResult)) {
+    throw new Error(`${name} must be a finite number when provided.`);
+  }
+  return numericResult;
 }
 
 function readStringArgument(value: unknown, name: string): string {

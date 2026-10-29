@@ -41,6 +41,11 @@ export type AppConfig = {
     geocodingBaseUrl: string;
     weatherBaseUrl: string;
     routingBaseUrl: string;
+    webSearchProvider: "brave" | "bing-rss";
+    webSearchApiKey?: string;
+    webSearchBaseUrl: string;
+    webSearchTimeoutMs: number;
+    webSearchMaxResults: number;
   };
   embedding: {
     provider: string;
@@ -95,6 +100,12 @@ const defaults = {
   geocodingBaseUrl: "https://nominatim.openstreetmap.org/search",
   weatherBaseUrl: "https://api.open-meteo.com/v1/forecast",
   routingBaseUrl: "https://router.project-osrm.org",
+  // Prefer the ranked provider when configured; the tool safely falls back to
+  // Bing RSS when no Brave key is available.
+  webSearchProvider: "brave" as const,
+  webSearchBaseUrl: "https://www.bing.com/search",
+  webSearchTimeoutMs: 8_000,
+  webSearchMaxResults: 5,
 } as const;
 
 function readStorageProvider(
@@ -228,6 +239,17 @@ function readBoolean(
   return fallback;
 }
 
+function readWebSearchProvider(
+  environment: Record<string, string | undefined>,
+  validationErrors: string[],
+): "brave" | "bing-rss" {
+  const value = environment.AI_WEB_SEARCH_PROVIDER?.trim().toLowerCase();
+  if (!value) return defaults.webSearchProvider;
+  if (value === "brave" || value === "bing-rss") return value;
+  validationErrors.push("AI_WEB_SEARCH_PROVIDER must be brave or bing-rss");
+  return defaults.webSearchProvider;
+}
+
 function readBoundedNumber(
   environment: Record<string, string | undefined>,
   name: string,
@@ -355,6 +377,11 @@ export function loadConfig(
   const multiAgentMaxConcurrency = readPositiveInteger(environment, "AI_MULTI_AGENT_MAX_CONCURRENCY", defaults.multiAgentMaxConcurrency, multiAgentValidationErrors);
   const multiAgentMaxGenerationAttempts = readPositiveInteger(environment, "AI_MULTI_AGENT_MAX_GENERATION_ATTEMPTS", defaults.multiAgentMaxGenerationAttempts, multiAgentValidationErrors);
   validationErrors.push(...multiAgentValidationErrors);
+  const webSearchValidationErrors: string[] = [];
+  const webSearchTimeoutMs = readPositiveInteger(environment, "AI_WEB_SEARCH_TIMEOUT_MS", defaults.webSearchTimeoutMs, webSearchValidationErrors);
+  const webSearchMaxResults = readPositiveInteger(environment, "AI_WEB_SEARCH_MAX_RESULTS", defaults.webSearchMaxResults, webSearchValidationErrors);
+  if (webSearchMaxResults > 10) webSearchValidationErrors.push("AI_WEB_SEARCH_MAX_RESULTS must be at most 10");
+  validationErrors.push(...webSearchValidationErrors);
 
   if (storageProvider === "postgres" && !databaseUrl) {
     storageValidationErrors.push(
@@ -430,6 +457,12 @@ export function loadConfig(
         environment.AI_WEATHER_BASE_URL?.trim() || defaults.weatherBaseUrl,
       routingBaseUrl:
         environment.AI_ROUTING_BASE_URL?.trim() || defaults.routingBaseUrl,
+      webSearchProvider: readWebSearchProvider(environment, validationErrors),
+      webSearchApiKey: environment.AI_WEB_SEARCH_API_KEY?.trim() || undefined,
+      webSearchBaseUrl:
+        environment.AI_WEB_SEARCH_BASE_URL?.trim() || defaults.webSearchBaseUrl,
+      webSearchTimeoutMs,
+      webSearchMaxResults: Math.min(webSearchMaxResults, 10),
     },
     embedding: {
       provider:

@@ -62,6 +62,43 @@ test("executes a tool and continues with its result", async () => {
   assert.equal(result.events.filter((event) => event.type === "tool_selected").length, 1);
 });
 
+test("falls back to a direct answer when the model requests an unavailable tool", async () => {
+  const requests: Array<{ toolCount: number; messages: string }> = [];
+  let calls = 0;
+
+  const result = await runAgent({
+    messages: [{ role: "user", content: "Do you have web search?" }],
+    tools,
+    complete: async (request) => {
+      requests.push({
+        toolCount: request.tools.length,
+        messages: request.messages.map((message) => message.content ?? "").join("\n"),
+      });
+      calls += 1;
+      if (calls === 1) {
+        return {
+          kind: "tool_calls",
+          message: { role: "assistant", content: null },
+          calls: [{ id: "call_unknown", name: "web_search", arguments: { query: "web search" } }],
+        };
+      }
+      return { kind: "final", text: "No, web search is not available in this application." };
+    },
+    execute: async (call) => ({
+      toolCallId: call.id,
+      name: call.name,
+      output: { error: `Unknown tool: ${call.name}` },
+      isError: true,
+    }),
+    maxIterations: 5,
+    maxToolCalls: 5,
+  });
+
+  assert.equal(result.text, "No, web search is not available in this application.");
+  assert.deepEqual(requests.map((request) => request.toolCount), [1, 0]);
+  assert.match(requests[1]?.messages ?? "", /not available in this application/);
+});
+
 test("stops when the iteration limit is reached", async () => {
   await assert.rejects(
     () =>

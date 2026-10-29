@@ -198,6 +198,11 @@ AI_PLANNER_MAX_GENERATION_ATTEMPTS=2
 AI_GEOCODING_BASE_URL=https://nominatim.openstreetmap.org/search
 AI_WEATHER_BASE_URL=https://api.open-meteo.com/v1/forecast
 AI_ROUTING_BASE_URL=https://router.project-osrm.org
+AI_WEB_SEARCH_PROVIDER=bing-rss
+AI_WEB_SEARCH_API_KEY=
+AI_WEB_SEARCH_BASE_URL=https://www.bing.com/search
+AI_WEB_SEARCH_TIMEOUT_MS=8000
+AI_WEB_SEARCH_MAX_RESULTS=5
 AI_EMBEDDING_PROVIDER=openai-compatible
 AI_EMBEDDING_API_KEY=ollama
 AI_EMBEDDING_BASE_URL=http://localhost:11434/v1
@@ -222,6 +227,27 @@ policy values. The PostgreSQL migration currently uses `vector(768)`, so its
 dimension must match the embedding model. The backend calculates
 the available input budget as context window minus maximum output minus safety
 margin.
+
+## Web search
+
+The `web_search` tool returns bounded, normalized results with a title, URL,
+snippet, source, position, provider, and search timestamp. It enforces a
+timeout and gives the model explicit citation guidance. The default `bing-rss`
+provider works without an API key for local learning. For richer ranked
+results, configure Brave Search:
+
+```env
+AI_WEB_SEARCH_PROVIDER=brave
+AI_WEB_SEARCH_API_KEY=your_brave_search_api_key
+AI_WEB_SEARCH_BASE_URL=https://api.search.brave.com/res/v1/web/search
+```
+
+The app does not copy full webpages into the prompt. The agent receives result
+titles, links, and short snippets, then should cite the linked sources and
+verify important claims. This keeps search responses bounded and makes sources
+visible. Brave is the preferred ranked provider when its API key is configured;
+without a key, the tool reports that it used the Bing RSS fallback rather than
+pretending it used Brave.
 
 ## Run the application
 

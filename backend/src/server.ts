@@ -29,12 +29,17 @@ import { learningTools } from "./tools/learning-tools.js";
 import { ToolRegistry } from "./tools/tool-registry.js";
 import { createExternalTools } from "./tools/external-tools.js";
 import { createGroundedWeatherResponse, isWeatherOnlyRequest, isWeatherRequest } from "./tools/weather-response.js";
+import { enforceSearchEvidence, isLiveSearchRequest, type WebSearchEvidence } from "./tools/web-search-guard.js";
 import { createPlan } from "./planning/planner.js";
 import { executePlan } from "./planning/plan-executor.js";
 import type { AgentRunResult } from "./agent/types.js";
 import type { PlanExecutionResult } from "./planning/types.js";
 import { runParallelOrchestrator } from "./multi-agent/orchestrator.js";
 import type { ParallelOrchestrationResult } from "./multi-agent/orchestrator.js";
+import { runHandoffOrchestrator } from "./multi-agent/handoff-orchestrator.js";
+import type { HandoffOrchestrationResult } from "./multi-agent/handoff-orchestrator.js";
+import { runSupervisorOrchestrator } from "./multi-agent/supervisor-orchestrator.js";
+import type { SupervisorOrchestrationResult } from "./multi-agent/supervisor-orchestrator.js";
 
 const config = loadConfig();
 const app = express();
@@ -356,12 +361,14 @@ app.get("/api/memories", async (request, response) => {
 });
 
 app.post("/api/chat", async (request, response) => {
-  const { messages: rawMessages, userId: rawUserId, conversationId, planning: rawPlanning, parallel: rawParallel, stream: rawStream } = request.body as {
+  const { messages: rawMessages, userId: rawUserId, conversationId, planning: rawPlanning, parallel: rawParallel, handoff: rawHandoff, supervisor: rawSupervisor, stream: rawStream } = request.body as {
     messages?: unknown;
     userId?: unknown;
     conversationId?: unknown;
     planning?: unknown;
     parallel?: unknown;
+    handoff?: unknown;
+    supervisor?: unknown;
     stream?: unknown;
     currentLocation?: unknown;
   };
@@ -437,14 +444,24 @@ app.post("/api/chat", async (request, response) => {
     response.status(400).json({ error: "parallel must be a boolean when provided" });
     return;
   }
+  if (rawHandoff !== undefined && typeof rawHandoff !== "boolean") {
+    response.status(400).json({ error: "handoff must be a boolean when provided" });
+    return;
+  }
+  if (rawSupervisor !== undefined && typeof rawSupervisor !== "boolean") {
+    response.status(400).json({ error: "supervisor must be a boolean when provided" });
+    return;
+  }
   if (rawStream !== undefined && typeof rawStream !== "boolean") {
     response.status(400).json({ error: "stream must be a boolean when provided" });
     return;
   }
   const planningEnabled = rawPlanning === true || (config.planning.enabled && rawPlanning !== false);
   const parallelEnabled = rawParallel === true;
-  if (planningEnabled && parallelEnabled) {
-    response.status(400).json({ error: "planning and parallel modes cannot be enabled together" });
+  const handoffEnabled = rawHandoff === true;
+  const supervisorEnabled = rawSupervisor === true;
+  if ([planningEnabled, parallelEnabled, handoffEnabled, supervisorEnabled].filter(Boolean).length > 1) {
+    response.status(400).json({ error: "planning, parallel, handoff, and supervisor modes cannot be enabled together" });
     return;
   }
   const streamEnabled = rawStream === true;
@@ -511,13 +528,30 @@ app.post("/api/chat", async (request, response) => {
   const toolSummary = toolDefinitions
     .map((tool) => `- ${tool.name}: ${tool.description}`)
     .join("\n");
-  const agentInstructions = `${instructions}\n\nAvailable tools:\n${toolSummary}\nUse a tool when it is useful for the user's request. If no tool is needed, answer directly. Preserve locations explicitly provided by the user. Use current location only when the user explicitly asks for it. Treat tool output as authoritative evidence. For weather, use the normalized fields when present: weatherDescription, currentPrecipitationMm, precipitationProbabilityPercent, rainExpected, and umbrellaRecommended. Never invent a precipitation percentage or claim rain when those fields say otherwise. Only provide umbrella advice when the user asks about umbrellas, rain, or precipitation.`;
+  const agentInstructions = `${instructions}\n\nAvailable tools:\n${toolSummary}\nUse a tool when it is useful for the user's request. If no tool is needed, answer directly. For current, live, recent, marketplace, price, listing, availability, or explicit web-search requests, you MUST call web_search before answering. When web_search returns results, cite only URLs present in those results; never invent URLs, listings, prices, or unrelated generic recommendations. If no verified results are returned, say that clearly. Never claim access to a capability that is not listed as an available tool. If the user asks whether an unavailable capability exists, answer directly that it is unavailable in this application; do not invent a tool call. Preserve locations explicitly provided by the user. Use current location only when the user explicitly asks for it. Treat tool output as authoritative evidence. For weather, use the normalized fields when present: weatherDescription, currentPrecipitationMm, precipitationProbabilityPercent, rainExpected, and umbrellaRecommended. Never invent a precipitation percentage or claim rain when those fields say otherwise. Only provide umbrella advice when the user asks about umbrellas, rain, or precipitation.`;
+  const liveSearchRequested = isLiveSearchRequest(latestUserMessage?.content ?? "");
+  let runtimeAgentInstructions = agentInstructions;
+  let preflightSearchOutputs: unknown[] = [];
+  if (liveSearchRequested) {
+    emitProgress({ type: "web_search_started" });
+    const preflight = await toolRegistry.execute(
+      "web_search",
+      { query: latestUserMessage?.content ?? "", maxResults: 10 },
+      { userId, currentLocation },
+      config.agent.toolTimeoutMs,
+    );
+    if (!preflight.isError) {
+      preflightSearchOutputs = [preflight.output];
+      runtimeAgentInstructions += `\n\nMandatory live-search evidence for this request:\n${JSON.stringify(preflight.output)}\nUse only these results and URLs. If the result list is empty, state that no verified live results were found.`;
+    }
+    emitProgress({ type: "web_search_finished", resultCount: !preflight.isError && preflight.output && typeof preflight.output === "object" && Array.isArray((preflight.output as Record<string, unknown>).results) ? (preflight.output as { results: unknown[] }).results.length : 0 });
+  }
 
   let managedContext;
 
   try {
     managedContext = prepareContext(
-      agentInstructions,
+      runtimeAgentInstructions,
       rawMessages,
       config.ai.tokenEstimator,
       config.ai.availableInputTokens,
@@ -571,6 +605,8 @@ app.post("/api/chat", async (request, response) => {
     let agentResult: AgentRunResult;
     let planResult: PlanExecutionResult | null = null;
     let parallelResult: ParallelOrchestrationResult | null = null;
+    let handoffResult: HandoffOrchestrationResult | null = null;
+    let supervisorResult: SupervisorOrchestrationResult | null = null;
 
     const completeModel = (agentRequest: Parameters<typeof completeWithOpenAICompatibleProvider>[3]) =>
       completeWithOpenAICompatibleProvider(
@@ -580,13 +616,48 @@ app.post("/api/chat", async (request, response) => {
         agentRequest,
       );
 
-    if (parallelEnabled) {
+    if (supervisorEnabled) {
+      emitProgress({ type: "supervisor_orchestration_started" });
+      supervisorResult = await runSupervisorOrchestrator({
+        complete: completeModel,
+        userRequest: latestUserMessage?.content ?? "",
+        baseMessages: managedContext.messages as AgentMessage[],
+        instructions: runtimeAgentInstructions,
+        tools: toolDefinitions,
+        execute: executeTool,
+        maxIterations: config.agent.maxIterations,
+        maxToolCalls: config.agent.maxToolCalls,
+        maxRetries: 1,
+        maxAgents: config.multiAgent.maxAgents,
+        onProgress: (event) => emitProgress(event as unknown as Record<string, unknown>),
+      });
+      agentResult = { text: supervisorResult.text, messages: [], events: [{ type: "started" }, { type: "finished", iterations: 1 }], iterations: 1 };
+    } else if (handoffEnabled) {
+      emitProgress({ type: "handoff_orchestration_started" });
+      handoffResult = await runHandoffOrchestrator({
+        complete: completeModel,
+        userRequest: latestUserMessage?.content ?? "",
+        baseMessages: managedContext.messages as AgentMessage[],
+        instructions: runtimeAgentInstructions,
+        tools: toolDefinitions,
+        execute: executeTool,
+        maxIterations: config.agent.maxIterations,
+        maxToolCalls: config.agent.maxToolCalls,
+        onProgress: (event) => emitProgress(event as unknown as Record<string, unknown>),
+      });
+      agentResult = {
+        text: handoffResult.text,
+        messages: [],
+        events: [{ type: "started" }, { type: "finished", iterations: 1 }],
+        iterations: 1,
+      };
+    } else if (parallelEnabled) {
       emitProgress({ type: "parallel_orchestration_started" });
       parallelResult = await runParallelOrchestrator({
         complete: completeModel,
         userRequest: latestUserMessage?.content ?? "",
         baseMessages: managedContext.messages as AgentMessage[],
-        instructions: agentInstructions,
+        instructions: runtimeAgentInstructions,
         tools: toolDefinitions,
         execute: executeTool,
         maxIterations: config.agent.maxIterations,
@@ -641,7 +712,7 @@ app.post("/api/chat", async (request, response) => {
         config.ai.maxOutputTokens,
         {
           messages: [
-            { role: "system", content: `${agentInstructions}\nYou are now summarizing a completed execution plan. Answer only what the original user requested; do not volunteer unrelated recommendations or advice. Treat tool output as authoritative evidence. Do not invent facts or reinterpret numeric fields when a normalized field is available. For weather, use normalized.rainExpected, normalized.precipitationProbabilityPercent, normalized.currentPrecipitationMm, and normalized.weatherDescription. Translate internal field names into natural language; never expose property paths such as normalized.rainExpected to the user. Mention umbrella guidance only when the original user explicitly asks about rain, precipitation, or carrying an umbrella. Do not mention hidden reasoning.` },
+            { role: "system", content: `${runtimeAgentInstructions}\nYou are now summarizing a completed execution plan. Answer only what the original user requested; do not volunteer unrelated recommendations or advice. Treat tool output as authoritative evidence. Do not invent facts or reinterpret numeric fields when a normalized field is available. For weather, use normalized.rainExpected, normalized.precipitationProbabilityPercent, normalized.currentPrecipitationMm, and normalized.weatherDescription. Translate internal field names into natural language; never expose property paths such as normalized.rainExpected to the user. Mention umbrella guidance only when the original user explicitly asks about rain, precipitation, or carrying an umbrella. Do not mention hidden reasoning.` },
             { role: "user", content: `Original request: ${latestUserMessage?.content ?? ""}\nExecution data: ${planSummary}` },
           ],
           tools: [],
@@ -657,7 +728,7 @@ app.post("/api/chat", async (request, response) => {
     } else {
       agentResult = await runAgent({
       messages: [
-        { role: "system", content: agentInstructions },
+        { role: "system", content: runtimeAgentInstructions },
         ...managedContext.messages,
       ] as AgentMessage[],
       tools: toolDefinitions,
@@ -669,7 +740,7 @@ app.post("/api/chat", async (request, response) => {
       });
     }
 
-    const executionOutputs = planningEnabled
+    const executionOutputs = [...preflightSearchOutputs, ...(planningEnabled
       ? planResult?.results.map(({ result }) => result.output) ?? []
       : parallelEnabled
         ? parallelResult?.results.flatMap((result) => result.status === "fulfilled"
@@ -678,10 +749,28 @@ app.post("/api/chat", async (request, response) => {
                   event.type === "tool_completed" && !event.isError ? [event.output] : [],
                 )
             : []) ?? []
-        : agentResult.events
+        : handoffEnabled
+          ? handoffResult?.workers.flatMap((worker) => worker.result.events
+              .flatMap((event) =>
+                event.type === "tool_completed" && !event.isError ? [event.output] : [],
+              )) ?? []
+          : supervisorEnabled
+            ? supervisorResult?.results.flatMap((result) => result.status === "completed"
+                ? result.value.events.flatMap((event) => event.type === "tool_completed" && !event.isError ? [event.output] : [])
+                : []) ?? []
+            : agentResult.events
           .flatMap((event) =>
             event.type === "tool_completed" && !event.isError ? [event.output] : [],
-          );
+          ))];
+    const webSearchEvidence = executionOutputs.filter((output): output is WebSearchEvidence =>
+      Boolean(output && typeof output === "object" && Array.isArray((output as Record<string, unknown>).results) && (output as Record<string, unknown>).provider),
+    );
+    if (liveSearchRequested) {
+      agentResult = {
+        ...agentResult,
+        text: enforceSearchEvidence(latestUserMessage?.content ?? "", agentResult.text, webSearchEvidence),
+      };
+    }
     if (isWeatherRequest(latestUserMessage?.content ?? "")) {
       const groundedWeatherResponse = createGroundedWeatherResponse(
         latestUserMessage?.content ?? "",
@@ -756,6 +845,36 @@ app.post("/api/chat", async (request, response) => {
                     .flatMap((event) => event.type === "tool_selected" ? [event.name] : [])
                 : [],
               error: result.status === "rejected" ? result.error : undefined,
+            })),
+          }
+        : { enabled: false },
+      handoff: handoffResult
+        ? {
+            enabled: true,
+            handoffs: handoffResult.handoffs,
+            workers: handoffResult.workers.map((worker) => ({
+              id: worker.id,
+              handoffId: worker.handoff.id,
+              status: "fulfilled",
+              iterations: worker.result.iterations,
+              toolCalls: worker.result.events.filter((event) => event.type === "tool_selected").length,
+              tools: worker.result.events
+                .filter((event) => event.type === "tool_selected")
+                .flatMap((event) => event.type === "tool_selected" ? [event.name] : []),
+            })),
+          }
+        : { enabled: false },
+      supervisor: supervisorResult
+        ? {
+            enabled: true,
+            tasks: supervisorResult.tasks,
+            events: supervisorResult.events,
+            workers: supervisorResult.results.map((result) => ({
+              id: result.task.id,
+              status: result.status,
+              attempts: result.attempts.length,
+              toolCalls: result.status === "completed" ? result.value.events.filter((event) => event.type === "tool_selected").length : 0,
+              error: result.status === "escalated" ? result.error : undefined,
             })),
           }
         : { enabled: false },
