@@ -1,0 +1,15 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: ai-fullstack-lab-postgres
+    environment:
+      POSTGRES_DB: ai_fullstack_lab
+      POSTGRES_USER: ai_lab
+      POSTGRES_PASSWORD: ai_lab
+    ports:
+      - "5432:5432"
+    volumes:
+      - ai-fullstack-lab-postgres:/var/lib/postgresql/data
+
+volumes:
+  ai-fullstack-lab-postgres:
