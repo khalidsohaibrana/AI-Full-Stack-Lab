@@ -15,6 +15,19 @@ type Message = {
   retryContent?: string;
 };
 
+type ChatResponse = {
+  text?: string;
+  error?: unknown;
+  details?: unknown;
+  code?: unknown;
+  context?: ContextMetadata;
+  retrieval?: RetrievalMetadata;
+  agent?: AgentMetadata;
+  conversationId?: string;
+  planning?: PlanningMetadata;
+  parallel?: ParallelMetadata;
+};
+
 type Conversation = {
   id: string;
   userId: string;
@@ -74,6 +87,12 @@ type PlanningMetadata = {
   replans?: number;
 };
 
+type ParallelMetadata = {
+  enabled: boolean;
+  tasks?: Array<{ id: string; objective: string }>;
+  workers?: Array<{ id: string; objective?: string; status: string; iterations: number; toolCalls: number; tools: string[]; error?: string }>;
+};
+
 type DirectionsOutput = {
   origin?: { name?: string; latitude?: number; longitude?: number };
   destination?: { name?: string; latitude?: number; longitude?: number };
@@ -122,6 +141,31 @@ function formatApiError(payload: unknown, fallback: string): string {
   const code = typeof body.code === "string" ? body.code : "";
   if (message && details) return `${message}: ${details}`;
   return message || details || code || fallback;
+}
+
+function describeProgress(event: Record<string, unknown>): string {
+  if (event.type === "memory_retrieval_started") return "Searching long-term memory…";
+  if (event.type === "memory_retrieval_finished") return "Memory search complete";
+  if (event.type === "planning_started") return "Creating an execution plan…";
+  if (event.type === "planning_finished") return "Plan validated · starting tools";
+  if (event.type === "parallel_orchestration_started" || event.type === "orchestrator_started") return "Orchestrator is splitting the task…";
+  if (event.type === "tasks_created") return "Worker tasks ready · starting agents";
+  if (event.type === "worker_progress") return `${String(event.id)} ${event.status === "rejected" ? "failed" : event.status === "fulfilled" ? "completed" : "started"}`;
+  if (event.type === "worker_event") {
+    const workerId = String(event.workerId);
+    const nested = event.event && typeof event.event === "object" ? event.event as Record<string, unknown> : {};
+    if (nested.type === "tool_selected") return `${workerId} is using ${String(nested.name)}…`;
+    if (nested.type === "tool_completed") return `${workerId} completed ${String(nested.name)}`;
+    if (nested.type === "started") return `${workerId} started`;
+  }
+  if (event.type === "aggregation_started") return "Collecting worker results…";
+  if (event.type === "aggregation_finished" || event.type === "final_answer_started") return "Writing the final answer…";
+  if (event.type === "agent_event") {
+    const nested = event.event && typeof event.event === "object" ? event.event as Record<string, unknown> : {};
+    if (nested.type === "tool_selected") return `Using ${String(nested.name)}…`;
+    if (nested.type === "tool_completed") return `Completed ${String(nested.name)}`;
+  }
+  return "Agent is working…";
 }
 
 function formatAgentEvent(event: AgentEvent): string {
@@ -205,13 +249,16 @@ function App() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [draft, setDraft] = useState("");
   const [isSending, setIsSending] = useState(false);
+  const [liveStatus, setLiveStatus] = useState("Agent is thinking…");
   const [contextMetadata, setContextMetadata] =
     useState<ContextMetadata | null>(null);
   const [retrievalMetadata, setRetrievalMetadata] =
     useState<RetrievalMetadata | null>(null);
   const [agentMetadata, setAgentMetadata] = useState<AgentMetadata | null>(null);
   const [planningMetadata, setPlanningMetadata] = useState<PlanningMetadata | null>(null);
+  const [parallelMetadata, setParallelMetadata] = useState<ParallelMetadata | null>(null);
   const [isPlanningEnabled, setIsPlanningEnabled] = useState(false);
+  const [isParallelEnabled, setIsParallelEnabled] = useState(false);
   const [userId, setUserId] = useState("local-user");
   const [memoryContent, setMemoryContent] = useState("");
   const [memoryType, setMemoryType] = useState<MemoryType>("preference");
@@ -230,7 +277,12 @@ function App() {
   const [locationStatus, setLocationStatus] = useState("Location not shared");
   const directionsOutput = getDirectionsOutput(agentMetadata);
   const plannedToolCalls = planningMetadata?.steps?.filter((step) => step.status === "completed").length ?? 0;
-  const visibleToolCalls = planningMetadata?.enabled ? plannedToolCalls : agentMetadata?.toolCalls ?? 0;
+  const parallelToolCalls = parallelMetadata?.workers?.reduce((total, worker) => total + worker.toolCalls, 0) ?? 0;
+  const visibleToolCalls = planningMetadata?.enabled
+    ? plannedToolCalls
+    : parallelMetadata?.enabled
+      ? parallelToolCalls
+      : agentMetadata?.toolCalls ?? 0;
   const googleMapsApiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY as string | undefined;
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
@@ -274,6 +326,7 @@ function App() {
       },
     ]);
     setIsSending(true);
+    setLiveStatus(isParallelEnabled ? "Starting parallel orchestration…" : isPlanningEnabled ? "Preparing the plan…" : "Agent is thinking…");
 
     try {
       const result = await fetch(apiBaseUrl + "/chat", {
@@ -284,20 +337,38 @@ function App() {
           userId,
           conversationId,
           planning: isPlanningEnabled,
+          parallel: isParallelEnabled,
+          stream: true,
           currentLocation,
         }),
       });
-      const data = (await result.json()) as {
-        text?: string;
-        error?: unknown;
-        details?: unknown;
-        code?: unknown;
-        context?: ContextMetadata;
-        retrieval?: RetrievalMetadata;
-        agent?: AgentMetadata;
-        conversationId?: string;
-        planning?: PlanningMetadata;
-      };
+      let data: ChatResponse;
+      if (result.headers.get("content-type")?.includes("text/event-stream")) {
+        const reader = result.body?.getReader();
+        if (!reader) throw new Error("The live agent stream could not be opened.");
+        const decoder = new TextDecoder();
+        let buffer = "";
+        let completed: ChatResponse | null = null;
+        while (true) {
+          const chunk = await reader.read();
+          buffer += decoder.decode(chunk.value ?? new Uint8Array(), { stream: !chunk.done });
+          const frames = buffer.split("\n\n");
+          buffer = frames.pop() ?? "";
+          for (const frame of frames) {
+            const eventName = frame.match(/^event:\s*(.+)$/m)?.[1]?.trim();
+            const payload = frame.match(/^data:\s*(.+)$/m)?.[1];
+            if (!payload) continue;
+            const eventData = JSON.parse(payload) as Record<string, unknown>;
+            if (eventName === "progress") setLiveStatus(describeProgress(eventData));
+            if (eventName === "error") throw new Error(formatApiError(eventData, "The assistant could not respond."));
+            if (eventName === "complete") completed = eventData as ChatResponse;
+          }
+          if (chunk.done) break;
+        }
+        data = completed ?? (() => { throw new Error("The agent stream ended without a final response."); })();
+      } else {
+        data = (await result.json()) as ChatResponse;
+      }
 
       if (!result.ok) {
         throw new Error(formatApiError(data, "The assistant could not respond."));
@@ -307,6 +378,7 @@ function App() {
       setRetrievalMetadata(data.retrieval ?? null);
       setAgentMetadata(data.agent ?? null);
       setPlanningMetadata(data.planning ?? null);
+      setParallelMetadata(data.parallel ?? null);
       setConversationId(data.conversationId ?? conversationId);
 
       setMessages((current) =>
@@ -336,6 +408,7 @@ function App() {
       );
     } finally {
       setIsSending(false);
+      setLiveStatus("Agent is thinking…");
     }
   }
 
@@ -673,14 +746,17 @@ function App() {
                 <div className={"message-card" + (message.error ? " has-error" : "")}>
                   <div className="message-meta">
                     <span>{message.role === "user" ? "You" : "Assistant"}</span>
-                    {message.pending && <span className="message-status">Thinking</span>}
+                    {message.pending && <span className="message-status">{liveStatus}</span>}
                   </div>
                   {message.pending ? (
-                    <div className="typing-indicator" aria-label="Assistant is thinking">
-                      <span />
-                      <span />
-                      <span />
-                    </div>
+                    <>
+                      <div className="typing-indicator" aria-label="Assistant is thinking">
+                        <span />
+                        <span />
+                        <span />
+                      </div>
+                      <p className="live-agent-status">{liveStatus}</p>
+                    </>
                   ) : message.role === "assistant" && !message.error ? (
                     <div className="markdown-content">
                       <Markdown remarkPlugins={[remarkGfm]}>{message.content}</Markdown>
@@ -870,6 +946,30 @@ function App() {
               </ol>
             </div>
           )}
+          {parallelMetadata?.enabled && (
+            <div className="planning-summary">
+              <div className="agent-summary-header">
+                <span>Parallel orchestration</span>
+                <strong>{parallelMetadata.workers?.length ?? 0} workers · {parallelMetadata.workers?.filter((worker) => worker.status === "fulfilled").length ?? 0} completed</strong>
+              </div>
+              <ol className="planning-steps">
+                {parallelMetadata.workers?.map((worker) => {
+                  const task = parallelMetadata.tasks?.find((candidate) => candidate.id === worker.id);
+                  return (
+                    <li key={worker.id} className={worker.status === "fulfilled" ? "completed" : "failed"}>
+                      <span>{worker.status === "fulfilled" ? "✓" : "!"}</span>
+                      <div>
+                        <strong>{worker.objective ?? task?.objective ?? worker.id}</strong>
+                        <small>{worker.id} · {worker.status} · {worker.iterations} iteration{worker.iterations === 1 ? "" : "s"} · {worker.toolCalls} tool calls</small>
+                        {worker.tools.length > 0 && <div className="worker-tools">{worker.tools.map((tool, index) => <code key={`${tool}-${index}`}>{tool}</code>)}</div>}
+                        {worker.error && <small className="memory-panel-error">{worker.error}</small>}
+                      </div>
+                    </li>
+                  );
+                })}
+              </ol>
+            </div>
+          )}
         </details>
       )}
 
@@ -899,8 +999,20 @@ function App() {
             type="button"
             onClick={() => setIsPlanningEnabled((enabled) => !enabled)}
             aria-pressed={isPlanningEnabled}
+            disabled={isParallelEnabled}
           >
             {isPlanningEnabled ? "Plan first" : "Direct loop"}
+          </button>
+          <button
+            className={"location-button planning-toggle" + (isParallelEnabled ? " is-active" : "")}
+            type="button"
+            onClick={() => {
+              setIsParallelEnabled((enabled) => !enabled);
+              setIsPlanningEnabled(false);
+            }}
+            aria-pressed={isParallelEnabled}
+          >
+            Parallel agents
           </button>
           <button
             className="send-button"

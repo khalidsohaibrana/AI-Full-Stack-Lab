@@ -7,7 +7,7 @@
     "dev": "tsx watch src/server.ts",
     "build": "tsc",
     "db:migrate": "tsx src/persistence/migrate.ts",
-    "test": "tsx --test src/config.test.ts src/context/*.test.ts src/chat-history/*.test.ts src/memory/*.test.ts src/embeddings/*.test.ts src/vector-store/*.test.ts src/retrieval/*.test.ts src/evaluation/*.test.ts src/tools/*.test.ts src/agent/*.test.ts src/planning/*.test.ts",
+    "test": "tsx --test src/config.test.ts src/context/*.test.ts src/chat-history/*.test.ts src/memory/*.test.ts src/embeddings/*.test.ts src/vector-store/*.test.ts src/retrieval/*.test.ts src/evaluation/*.test.ts src/tools/*.test.ts src/agent/*.test.ts src/planning/*.test.ts src/multi-agent/*.test.ts",
     "evaluate:memory": "tsx src/evaluation/run-memory-evaluation.ts",
     "start": "node dist/server.js"
   },

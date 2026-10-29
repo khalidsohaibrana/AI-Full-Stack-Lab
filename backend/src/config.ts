@@ -32,6 +32,11 @@ export type AppConfig = {
     maxStepRetries: number;
     maxGenerationAttempts: number;
   };
+  multiAgent: {
+    maxAgents: number;
+    maxConcurrency: number;
+    maxGenerationAttempts: number;
+  };
   external: {
     geocodingBaseUrl: string;
     weatherBaseUrl: string;
@@ -84,6 +89,9 @@ const defaults = {
   planningMaxReplans: 2,
   planningMaxStepRetries: 1,
   planningMaxGenerationAttempts: 2,
+  multiAgentMaxAgents: 4,
+  multiAgentMaxConcurrency: 3,
+  multiAgentMaxGenerationAttempts: 2,
   geocodingBaseUrl: "https://nominatim.openstreetmap.org/search",
   weatherBaseUrl: "https://api.open-meteo.com/v1/forecast",
   routingBaseUrl: "https://router.project-osrm.org",
@@ -342,6 +350,11 @@ export function loadConfig(
   const planningMaxStepRetries = readNonNegativeInteger(environment, "AI_PLANNER_MAX_STEP_RETRIES", defaults.planningMaxStepRetries, planningValidationErrors);
   const planningMaxGenerationAttempts = readPositiveInteger(environment, "AI_PLANNER_MAX_GENERATION_ATTEMPTS", defaults.planningMaxGenerationAttempts, planningValidationErrors);
   validationErrors.push(...planningValidationErrors);
+  const multiAgentValidationErrors: string[] = [];
+  const multiAgentMaxAgents = readPositiveInteger(environment, "AI_MULTI_AGENT_MAX_AGENTS", defaults.multiAgentMaxAgents, multiAgentValidationErrors);
+  const multiAgentMaxConcurrency = readPositiveInteger(environment, "AI_MULTI_AGENT_MAX_CONCURRENCY", defaults.multiAgentMaxConcurrency, multiAgentValidationErrors);
+  const multiAgentMaxGenerationAttempts = readPositiveInteger(environment, "AI_MULTI_AGENT_MAX_GENERATION_ATTEMPTS", defaults.multiAgentMaxGenerationAttempts, multiAgentValidationErrors);
+  validationErrors.push(...multiAgentValidationErrors);
 
   if (storageProvider === "postgres" && !databaseUrl) {
     storageValidationErrors.push(
@@ -404,6 +417,11 @@ export function loadConfig(
       maxReplans: planningMaxReplans,
       maxStepRetries: planningMaxStepRetries,
       maxGenerationAttempts: planningMaxGenerationAttempts,
+    },
+    multiAgent: {
+      maxAgents: multiAgentMaxAgents,
+      maxConcurrency: multiAgentMaxConcurrency,
+      maxGenerationAttempts: multiAgentMaxGenerationAttempts,
     },
     external: {
       geocodingBaseUrl:

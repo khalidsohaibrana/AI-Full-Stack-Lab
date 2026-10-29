@@ -35,6 +35,7 @@ export type AgentRunOptions = {
   execute: (call: ToolCall) => Promise<ToolResult>;
   maxIterations: number;
   maxToolCalls: number;
+  onEvent?: (event: AgentEvent) => void;
 };
 
 export type AgentRunResult = {
