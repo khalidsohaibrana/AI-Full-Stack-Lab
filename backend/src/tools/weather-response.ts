@@ -13,6 +13,10 @@ export function isWeatherRequest(request: string): boolean {
   return /\b(weather|rain|raining|precipitation|forecast|umbrella)\b/iu.test(request);
 }
 
+export function isWeatherOnlyRequest(request: string): boolean {
+  return isWeatherRequest(request) && !/\b(and|also|plus|calculate|compute|sum|multiply|divide|times)\b|[+*/=]/iu.test(request);
+}
+
 export function createGroundedWeatherResponse(
   request: string,
   outputs: unknown[],

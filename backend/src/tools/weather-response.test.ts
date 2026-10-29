@@ -1,10 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createGroundedWeatherResponse, isWeatherRequest } from "./weather-response.js";
+import { createGroundedWeatherResponse, isWeatherOnlyRequest, isWeatherRequest } from "./weather-response.js";
 
 test("identifies weather requests", () => {
   assert.equal(isWeatherRequest("Should I carry an umbrella in Lahore?"), true);
   assert.equal(isWeatherRequest("Explain planning agents"), false);
+  assert.equal(isWeatherOnlyRequest("Should I carry an umbrella in Lahore?"), true);
+  assert.equal(isWeatherOnlyRequest("Get Lahore weather and calculate 2 + 2"), false);
 });
 
 test("formats weather from normalized evidence without model interpretation", () => {

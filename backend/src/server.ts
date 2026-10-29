@@ -28,11 +28,13 @@ import type { VectorStore } from "./vector-store/types.js";
 import { learningTools } from "./tools/learning-tools.js";
 import { ToolRegistry } from "./tools/tool-registry.js";
 import { createExternalTools } from "./tools/external-tools.js";
-import { createGroundedWeatherResponse, isWeatherRequest } from "./tools/weather-response.js";
+import { createGroundedWeatherResponse, isWeatherOnlyRequest, isWeatherRequest } from "./tools/weather-response.js";
 import { createPlan } from "./planning/planner.js";
 import { executePlan } from "./planning/plan-executor.js";
 import type { AgentRunResult } from "./agent/types.js";
 import type { PlanExecutionResult } from "./planning/types.js";
+import { runParallelOrchestrator } from "./multi-agent/orchestrator.js";
+import type { ParallelOrchestrationResult } from "./multi-agent/orchestrator.js";
 
 const config = loadConfig();
 const app = express();
@@ -199,6 +201,7 @@ app.get("/api/health", async (_request, response) => {
       tools: toolRegistry.listDefinitions().map((tool) => tool.name),
     },
     planning: config.planning,
+    multiAgent: config.multiAgent,
     externalTools: {
       geocodingBaseUrl: config.external.geocodingBaseUrl,
       weatherBaseUrl: config.external.weatherBaseUrl,
@@ -353,11 +356,13 @@ app.get("/api/memories", async (request, response) => {
 });
 
 app.post("/api/chat", async (request, response) => {
-  const { messages: rawMessages, userId: rawUserId, conversationId, planning: rawPlanning } = request.body as {
+  const { messages: rawMessages, userId: rawUserId, conversationId, planning: rawPlanning, parallel: rawParallel, stream: rawStream } = request.body as {
     messages?: unknown;
     userId?: unknown;
     conversationId?: unknown;
     planning?: unknown;
+    parallel?: unknown;
+    stream?: unknown;
     currentLocation?: unknown;
   };
 
@@ -428,7 +433,38 @@ app.post("/api/chat", async (request, response) => {
     response.status(400).json({ error: "planning must be a boolean when provided" });
     return;
   }
+  if (rawParallel !== undefined && typeof rawParallel !== "boolean") {
+    response.status(400).json({ error: "parallel must be a boolean when provided" });
+    return;
+  }
+  if (rawStream !== undefined && typeof rawStream !== "boolean") {
+    response.status(400).json({ error: "stream must be a boolean when provided" });
+    return;
+  }
   const planningEnabled = rawPlanning === true || (config.planning.enabled && rawPlanning !== false);
+  const parallelEnabled = rawParallel === true;
+  if (planningEnabled && parallelEnabled) {
+    response.status(400).json({ error: "planning and parallel modes cannot be enabled together" });
+    return;
+  }
+  const streamEnabled = rawStream === true;
+  if (streamEnabled) {
+    response.status(200);
+    response.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+    response.setHeader("Cache-Control", "no-cache, no-transform");
+    response.setHeader("Connection", "keep-alive");
+    response.flushHeaders();
+  }
+  const emitProgress = (event: Record<string, unknown>) => {
+    if (!streamEnabled || response.writableEnded) return;
+    response.write(`event: progress\ndata: ${JSON.stringify(event)}\n\n`);
+  };
+  const endStreamWithError = (error: string, code?: string) => {
+    if (!streamEnabled || response.writableEnded) return false;
+    response.write(`event: error\ndata: ${JSON.stringify({ error, code })}\n\n`);
+    response.end();
+    return true;
+  };
   if (
     conversationId !== undefined &&
     conversationId !== null &&
@@ -456,15 +492,18 @@ app.post("/api/chat", async (request, response) => {
   let retrieval;
 
   try {
+    emitProgress({ type: "memory_retrieval_started" });
     retrieval = await retrievalService.retrieve(
       userId,
       latestUserMessage?.content ?? "",
     );
   } catch (error) {
     console.error(error);
+    if (endStreamWithError("memory retrieval failed")) return;
     response.status(502).json({ error: "memory retrieval failed" });
     return;
   }
+  emitProgress({ type: "memory_retrieval_finished", resultCount: retrieval.metadata.resultCount });
   const instructions = retrieval.context
     ? `${config.ai.instructions}\n\n${retrieval.context}`
     : config.ai.instructions;
@@ -531,8 +570,40 @@ app.post("/api/chat", async (request, response) => {
   try {
     let agentResult: AgentRunResult;
     let planResult: PlanExecutionResult | null = null;
+    let parallelResult: ParallelOrchestrationResult | null = null;
 
-    if (planningEnabled) {
+    const completeModel = (agentRequest: Parameters<typeof completeWithOpenAICompatibleProvider>[3]) =>
+      completeWithOpenAICompatibleProvider(
+        modelClient,
+        aiModel,
+        config.ai.maxOutputTokens,
+        agentRequest,
+      );
+
+    if (parallelEnabled) {
+      emitProgress({ type: "parallel_orchestration_started" });
+      parallelResult = await runParallelOrchestrator({
+        complete: completeModel,
+        userRequest: latestUserMessage?.content ?? "",
+        baseMessages: managedContext.messages as AgentMessage[],
+        instructions: agentInstructions,
+        tools: toolDefinitions,
+        execute: executeTool,
+        maxIterations: config.agent.maxIterations,
+        maxToolCalls: config.agent.maxToolCalls,
+        maxAgents: config.multiAgent.maxAgents,
+        maxConcurrency: config.multiAgent.maxConcurrency,
+        maxGenerationAttempts: config.multiAgent.maxGenerationAttempts,
+        onProgress: (event) => emitProgress(event as unknown as Record<string, unknown>),
+      });
+      agentResult = {
+        text: parallelResult.text,
+        messages: [],
+        events: [{ type: "started" }, { type: "finished", iterations: 1 }],
+        iterations: 1,
+      };
+    } else if (planningEnabled) {
+      emitProgress({ type: "planning_started" });
       const plan = await createPlan({
         client: modelClient,
         model: aiModel,
@@ -558,6 +629,7 @@ app.post("/api/chat", async (request, response) => {
           replanningContext: JSON.stringify({ failedPlan, error, results }),
         }),
       });
+      emitProgress({ type: "planning_finished", stepCount: planResult.plan.steps.length });
       const planSummary = JSON.stringify({
         goal: planResult.plan.goal,
         steps: planResult.plan.steps,
@@ -589,22 +661,24 @@ app.post("/api/chat", async (request, response) => {
         ...managedContext.messages,
       ] as AgentMessage[],
       tools: toolDefinitions,
-      complete: (agentRequest) =>
-        completeWithOpenAICompatibleProvider(
-          modelClient,
-          aiModel,
-          config.ai.maxOutputTokens,
-          agentRequest,
-        ),
+        complete: completeModel,
       execute: executeTool,
       maxIterations: config.agent.maxIterations,
       maxToolCalls: config.agent.maxToolCalls,
+      onEvent: (event) => emitProgress({ type: "agent_event", event }),
       });
     }
 
     const executionOutputs = planningEnabled
       ? planResult?.results.map(({ result }) => result.output) ?? []
-      : agentResult.events
+      : parallelEnabled
+        ? parallelResult?.results.flatMap((result) => result.status === "fulfilled"
+            ? result.value.events
+                .flatMap((event) =>
+                  event.type === "tool_completed" && !event.isError ? [event.output] : [],
+                )
+            : []) ?? []
+        : agentResult.events
           .flatMap((event) =>
             event.type === "tool_completed" && !event.isError ? [event.output] : [],
           );
@@ -619,8 +693,12 @@ app.post("/api/chat", async (request, response) => {
           "missing_weather_evidence",
         );
       }
-      agentResult = { ...agentResult, text: groundedWeatherResponse };
+      if (isWeatherOnlyRequest(latestUserMessage?.content ?? "")) {
+        agentResult = { ...agentResult, text: groundedWeatherResponse };
+      }
     }
+
+    emitProgress({ type: "final_answer_started" });
 
     if (!activeConversationId) {
       const conversation = await chatHistoryStore.createConversation(userId);
@@ -635,7 +713,7 @@ app.post("/api/chat", async (request, response) => {
       );
     }
 
-    response.json({
+    const payload = {
       text: agentResult.text,
       conversationId: activeConversationId,
       context: {
@@ -660,9 +738,37 @@ app.post("/api/chat", async (request, response) => {
             replans: planResult.replans,
           }
         : { enabled: false },
-    });
+      parallel: parallelResult
+        ? {
+            enabled: true,
+            tasks: parallelResult.tasks,
+            workers: parallelResult.results.map((result) => ({
+              id: result.id,
+              status: result.status,
+              objective: parallelResult.tasks.find((task) => task.id === result.id)?.objective,
+              iterations: result.status === "fulfilled" ? result.value.iterations : 0,
+              toolCalls: result.status === "fulfilled"
+                ? result.value.events.filter((event) => event.type === "tool_selected").length
+                : 0,
+              tools: result.status === "fulfilled"
+                ? result.value.events
+                    .filter((event) => event.type === "tool_selected")
+                    .flatMap((event) => event.type === "tool_selected" ? [event.name] : [])
+                : [],
+              error: result.status === "rejected" ? result.error : undefined,
+            })),
+          }
+        : { enabled: false },
+    };
+    if (streamEnabled) {
+      response.write(`event: complete\ndata: ${JSON.stringify(payload)}\n\n`);
+      response.end();
+    } else {
+      response.json(payload);
+    }
   } catch (error) {
     if (error instanceof AgentLoopError) {
+      if (endStreamWithError(error.message, error.code)) return;
       response.status(502).json({
         error: error.message,
         code: error.code,
@@ -671,6 +777,7 @@ app.post("/api/chat", async (request, response) => {
     }
 
     console.error(error);
+    if (endStreamWithError(error instanceof Error ? error.message : "agent request failed", "agent_request_failed")) return;
     response.status(502).json({
       error: error instanceof Error ? error.message : "agent request failed",
       code: "agent_request_failed",

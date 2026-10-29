@@ -24,10 +24,12 @@ export class AgentLoopError extends Error {
 export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult> {
   const messages = [...options.messages];
   const events: AgentEvent[] = [{ type: "started" }];
+  options.onEvent?.({ type: "started" });
   let toolCallCount = 0;
 
   for (let iteration = 1; iteration <= options.maxIterations; iteration += 1) {
     events.push({ type: "iteration_started", iteration });
+    options.onEvent?.({ type: "iteration_started", iteration });
     const response = await options.complete({
       messages: [...messages],
       tools: [...options.tools],
@@ -35,6 +37,7 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
 
     if (response.kind === "final") {
       events.push({ type: "finished", iterations: iteration });
+      options.onEvent?.({ type: "finished", iterations: iteration });
       return { text: response.text, messages, events, iterations: iteration };
     }
 
@@ -43,6 +46,7 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
 
     if (toolCallCount > options.maxToolCalls) {
       events.push({ type: "stopped", reason: "maximum_tool_calls_reached" });
+      options.onEvent?.({ type: "stopped", reason: "maximum_tool_calls_reached" });
       throw new AgentLoopError(
         `The agent exceeded the maximum of ${options.maxToolCalls} tool calls.`,
         "max_tool_calls",
@@ -53,9 +57,17 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
 
     for (const call of response.calls) {
       events.push({ type: "tool_selected", toolCallId: call.id, name: call.name });
+      options.onEvent?.({ type: "tool_selected", toolCallId: call.id, name: call.name });
       const result = await options.execute(call);
       messages.push(toToolMessage(result));
       events.push({
+        type: "tool_completed",
+        toolCallId: call.id,
+        name: call.name,
+        isError: result.isError === true,
+        output: result.output,
+      });
+      options.onEvent?.({
         type: "tool_completed",
         toolCallId: call.id,
         name: call.name,
@@ -66,6 +78,7 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
   }
 
   events.push({ type: "stopped", reason: "maximum_iterations_reached" });
+  options.onEvent?.({ type: "stopped", reason: "maximum_iterations_reached" });
   throw new AgentLoopError(
     `The agent exceeded the maximum of ${options.maxIterations} iterations.`,
     "max_iterations",

@@ -722,6 +722,9 @@ button { font: inherit; }
 .planning-steps div { display: grid; gap: 2px; }
 .planning-steps strong { color: #d7deea; font-weight: 500; }
 .planning-steps small { color: #7788a3; }
+.worker-tools { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 4px; }
+.worker-tools code { color: #d7fba4; font-size: 0.78rem; }
+.live-agent-status { margin: 8px 0 0; color: #9ab4d8; font-size: 0.86rem; }
 
 @media (max-width: 640px) {
   .chat-shell { width: min(100% - 24px, 960px); }
