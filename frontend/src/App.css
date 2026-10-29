@@ -683,6 +683,7 @@ button { font: inherit; }
 }
 
 .location-button:hover { border-color: #b9f36b; color: #b9f36b; }
+.planning-toggle.is-active { border-color: #b9f36b; color: #b9f36b; background: #182319; }
 
 .location-status {
   margin: 6px 2px 0;
@@ -705,6 +706,22 @@ button { font: inherit; }
 }
 
 .send-button:disabled { cursor: not-allowed; opacity: 0.35; }
+
+.planning-summary {
+  margin: 10px;
+  padding: 12px 10px 4px;
+  border-top: 1px solid #293546;
+}
+
+.planning-summary > p { margin: 8px 0; color: #9aa9be; }
+.planning-steps { display: grid; gap: 7px; margin: 0; padding: 0; list-style: none; }
+.planning-steps li { display: flex; gap: 9px; color: #9aa9be; }
+.planning-steps li > span { color: #7788a3; }
+.planning-steps li.completed > span { color: #b9f36b; }
+.planning-steps li.failed > span { color: #f09a9a; }
+.planning-steps div { display: grid; gap: 2px; }
+.planning-steps strong { color: #d7deea; font-weight: 500; }
+.planning-steps small { color: #7788a3; }
 
 @media (max-width: 640px) {
   .chat-shell { width: min(100% - 24px, 960px); }

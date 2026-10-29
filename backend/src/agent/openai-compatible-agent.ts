@@ -20,6 +20,9 @@ export async function completeWithOpenAICompatibleProvider(
         parameters: tool.parameters,
       },
     })),
+    ...(request.responseFormat
+      ? { response_format: { type: request.responseFormat } }
+      : {}),
   });
 
   const message = response.choices[0]?.message;

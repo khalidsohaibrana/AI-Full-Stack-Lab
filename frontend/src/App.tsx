@@ -66,6 +66,14 @@ type AgentMetadata = {
   events: AgentEvent[];
 };
 
+type PlanningMetadata = {
+  enabled: boolean;
+  goal?: string;
+  steps?: Array<{ id: string; description: string; action: string; status: string }>;
+  events?: Array<{ type: string; stepId?: string; action?: string; error?: string }>;
+  replans?: number;
+};
+
 type DirectionsOutput = {
   origin?: { name?: string; latitude?: number; longitude?: number };
   destination?: { name?: string; latitude?: number; longitude?: number };
@@ -93,6 +101,27 @@ const starterPrompts = [
 
 function createId() {
   return crypto.randomUUID();
+}
+
+function formatApiError(payload: unknown, fallback: string): string {
+  if (typeof payload === "string" && payload.trim()) return payload;
+  if (!payload || typeof payload !== "object") return fallback;
+
+  const body = payload as Record<string, unknown>;
+  const errorValue = body.error;
+  const message = typeof errorValue === "string"
+    ? errorValue
+    : errorValue && typeof errorValue === "object" && typeof (errorValue as Record<string, unknown>).message === "string"
+      ? (errorValue as Record<string, unknown>).message as string
+      : "";
+  const details = Array.isArray(body.details)
+    ? body.details.filter((item): item is string => typeof item === "string").join("; ")
+    : typeof body.details === "string"
+      ? body.details
+      : "";
+  const code = typeof body.code === "string" ? body.code : "";
+  if (message && details) return `${message}: ${details}`;
+  return message || details || code || fallback;
 }
 
 function formatAgentEvent(event: AgentEvent): string {
@@ -181,6 +210,8 @@ function App() {
   const [retrievalMetadata, setRetrievalMetadata] =
     useState<RetrievalMetadata | null>(null);
   const [agentMetadata, setAgentMetadata] = useState<AgentMetadata | null>(null);
+  const [planningMetadata, setPlanningMetadata] = useState<PlanningMetadata | null>(null);
+  const [isPlanningEnabled, setIsPlanningEnabled] = useState(false);
   const [userId, setUserId] = useState("local-user");
   const [memoryContent, setMemoryContent] = useState("");
   const [memoryType, setMemoryType] = useState<MemoryType>("preference");
@@ -198,6 +229,8 @@ function App() {
   const [currentLocation, setCurrentLocation] = useState<CurrentLocation | null>(null);
   const [locationStatus, setLocationStatus] = useState("Location not shared");
   const directionsOutput = getDirectionsOutput(agentMetadata);
+  const plannedToolCalls = planningMetadata?.steps?.filter((step) => step.status === "completed").length ?? 0;
+  const visibleToolCalls = planningMetadata?.enabled ? plannedToolCalls : agentMetadata?.toolCalls ?? 0;
   const googleMapsApiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY as string | undefined;
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
@@ -250,25 +283,30 @@ function App() {
           messages: conversation,
           userId,
           conversationId,
+          planning: isPlanningEnabled,
           currentLocation,
         }),
       });
       const data = (await result.json()) as {
         text?: string;
-        error?: string;
+        error?: unknown;
+        details?: unknown;
+        code?: unknown;
         context?: ContextMetadata;
         retrieval?: RetrievalMetadata;
         agent?: AgentMetadata;
         conversationId?: string;
+        planning?: PlanningMetadata;
       };
 
       if (!result.ok) {
-        throw new Error(data.error ?? "The assistant could not respond.");
+        throw new Error(formatApiError(data, "The assistant could not respond."));
       }
 
       setContextMetadata(data.context ?? null);
       setRetrievalMetadata(data.retrieval ?? null);
       setAgentMetadata(data.agent ?? null);
+      setPlanningMetadata(data.planning ?? null);
       setConversationId(data.conversationId ?? conversationId);
 
       setMessages((current) =>
@@ -327,6 +365,7 @@ function App() {
     setContextMetadata(null);
     setRetrievalMetadata(null);
     setAgentMetadata(null);
+    setPlanningMetadata(null);
     composerRef.current?.focus();
   }
 
@@ -426,6 +465,7 @@ function App() {
       setContextMetadata(null);
       setRetrievalMetadata(null);
       setAgentMetadata(null);
+      setPlanningMetadata(null);
       setIsMemoryDrawerOpen(false);
       composerRef.current?.focus();
     } catch (error) {
@@ -516,7 +556,7 @@ function App() {
               <span>Context window</span><small>{contextMetadata ? "Ready" : "—"}</small>
             </button>
             <button type="button" onClick={() => document.getElementById("agent-execution")?.scrollIntoView({ behavior: "smooth" })}>
-              <span>Agent loop & tools</span><small>{agentMetadata ? agentMetadata.toolCalls : "—"}</small>
+              <span>Agent loop & tools</span><small>{agentMetadata ? visibleToolCalls : "—"}</small>
             </button>
           </nav>
           <section id="chat-history" className="memory-layer">
@@ -796,8 +836,8 @@ function App() {
                 <span>Agent execution</span>
                 <strong>
                   {agentMetadata.iterations} iteration{agentMetadata.iterations === 1 ? "" : "s"}
-                  {agentMetadata.toolCalls > 0
-                    ? ` · ${agentMetadata.toolCalls} tool call${agentMetadata.toolCalls === 1 ? "" : "s"}`
+                  {visibleToolCalls > 0
+                    ? ` · ${visibleToolCalls} ${planningMetadata?.enabled ? "planned " : ""}tool call${visibleToolCalls === 1 ? "" : "s"}`
                     : " · no tools used"}
                 </strong>
               </div>
@@ -810,6 +850,23 @@ function App() {
                       {event.name && <code>{event.name}</code>}
                     </li>
                   ))}
+              </ol>
+            </div>
+          )}
+          {planningMetadata?.enabled && (
+            <div className="planning-summary">
+              <div className="agent-summary-header">
+                <span>Execution plan</span>
+                <strong>{planningMetadata.replans ?? 0} replans</strong>
+              </div>
+              <p>{planningMetadata.goal}</p>
+              <ol className="planning-steps">
+                {planningMetadata.steps?.map((step) => (
+                  <li key={step.id} className={step.status}>
+                    <span>{step.status === "completed" ? "✓" : step.status === "failed" ? "!" : "·"}</span>
+                    <div><strong>{step.description}</strong><small>{step.action} · {step.status}</small></div>
+                  </li>
+                ))}
               </ol>
             </div>
           )}
@@ -836,6 +893,14 @@ function App() {
             aria-label="Share current location"
           >
             {currentLocation ? "Location ready" : "Use current location"}
+          </button>
+          <button
+            className={"location-button planning-toggle" + (isPlanningEnabled ? " is-active" : "")}
+            type="button"
+            onClick={() => setIsPlanningEnabled((enabled) => !enabled)}
+            aria-pressed={isPlanningEnabled}
+          >
+            {isPlanningEnabled ? "Plan first" : "Direct loop"}
           </button>
           <button
             className="send-button"

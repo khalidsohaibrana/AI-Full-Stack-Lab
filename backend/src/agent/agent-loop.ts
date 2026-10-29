@@ -10,7 +10,11 @@ import type {
 export class AgentLoopError extends Error {
   constructor(
     message: string,
-    public readonly code: "max_iterations" | "max_tool_calls" | "invalid_model_response",
+    public readonly code:
+      | "max_iterations"
+      | "max_tool_calls"
+      | "invalid_model_response"
+      | "missing_weather_evidence",
   ) {
     super(message);
     this.name = "AgentLoopError";

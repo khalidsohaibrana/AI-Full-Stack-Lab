@@ -108,6 +108,11 @@ capabilities vary:
     AI_AGENT_MAX_TOOL_CALLS=10
     AI_AGENT_TOOL_TIMEOUT_MS=10000
     AI_AGENT_MAX_TOOL_RESULT_CHARS=8000
+    AI_PLANNING_ENABLED=false
+    AI_PLANNER_MAX_STEPS=8
+    AI_PLANNER_MAX_REPLANS=2
+    AI_PLANNER_MAX_STEP_RETRIES=1
+    AI_PLANNER_MAX_GENERATION_ATTEMPTS=2
 
 External tool providers are configurable as well:
 
@@ -148,6 +153,12 @@ The agent loop is implemented without an agent framework. It normalizes the
 OpenAI-compatible provider response, validates model-generated tool calls,
 executes registered tools with timeouts and result-size limits, and repeats
 until a final answer is returned or a configured limit is reached.
+
+The optional planning path is enabled with `planning: true` on `/api/chat` or
+with `AI_PLANNING_ENABLED=true`. It validates model-generated plans against
+registered tools, rejects dependency cycles and unknown actions, executes steps
+with retry/replan limits, and returns planning metadata for the UI. It does not
+expose hidden model reasoning.
 
 The default external tools use OpenStreetMap Nominatim for place lookup,
 Open-Meteo for weather, and OSRM for driving, walking, and cycling routes.

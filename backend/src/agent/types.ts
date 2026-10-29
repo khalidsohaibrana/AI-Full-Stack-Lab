@@ -13,6 +13,7 @@ export type AgentMessage =
 export type ModelCompletionRequest = {
   messages: AgentMessage[];
   tools: ToolDefinition[];
+  responseFormat?: "json_object";
 };
 
 export type ModelCompletionResponse =

@@ -190,6 +190,11 @@ AI_AGENT_MAX_ITERATIONS=5
 AI_AGENT_MAX_TOOL_CALLS=10
 AI_AGENT_TOOL_TIMEOUT_MS=10000
 AI_AGENT_MAX_TOOL_RESULT_CHARS=8000
+AI_PLANNING_ENABLED=false
+AI_PLANNER_MAX_STEPS=8
+AI_PLANNER_MAX_REPLANS=2
+AI_PLANNER_MAX_STEP_RETRIES=1
+AI_PLANNER_MAX_GENERATION_ATTEMPTS=2
 AI_GEOCODING_BASE_URL=https://nominatim.openstreetmap.org/search
 AI_WEATHER_BASE_URL=https://api.open-meteo.com/v1/forecast
 AI_ROUTING_BASE_URL=https://router.project-osrm.org
@@ -295,6 +300,12 @@ registry, calculator/current-time/memory-search tools, validated tool calls,
 bounded execution, tool-result messages, and frontend execution metadata. Its
 limits are configurable through the `AI_AGENT_*` variables in
 `backend/.env.example`.
+
+Part 4 adds an opt-in planning path. Enable it with the `Plan first` control in
+the frontend or send `planning: true` to `/api/chat`. The planner returns a
+validated structured plan, the executor runs registered tools with bounded
+retries, and a replanner can revise the plan within configured limits. See
+[docs/part-4-planning-plan.md](docs/part-4-planning-plan.md).
 
 It also includes weather and directions tools. The defaults use OpenStreetMap
 Nominatim for place lookup, Open-Meteo for weather, and OSRM for route

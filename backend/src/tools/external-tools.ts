@@ -78,6 +78,20 @@ function createWeatherTool(config: ExternalToolConfig): Tool {
       url.searchParams.set("timezone", "auto");
 
       const data = await fetchJson<WeatherResponse>(url);
+      const current = data.current ?? {};
+      const today = data.daily ?? {};
+      const currentPrecipitationMm = readNumber(current.precipitation) ?? 0;
+      const precipitationProbabilityPercent = readFirstNumber(
+        today.precipitation_probability_max,
+      ) ?? 0;
+      const currentWeatherCode = readNumber(current.weather_code);
+      const todayWeatherCode = readFirstNumber(today.weather_code);
+      const weatherDescription = describeWeatherCode(
+        currentWeatherCode ?? todayWeatherCode,
+      );
+      const rainExpected =
+        currentPrecipitationMm > 0 || precipitationProbabilityPercent > 0 ||
+        isRainCode(currentWeatherCode ?? todayWeatherCode);
       return {
         location: coordinates.name,
         coordinates: {
@@ -87,6 +101,13 @@ function createWeatherTool(config: ExternalToolConfig): Tool {
         timezone: data.timezone,
         current: data.current,
         today: data.daily,
+        normalized: {
+          currentPrecipitationMm,
+          precipitationProbabilityPercent,
+          weatherDescription,
+          rainExpected,
+          umbrellaRecommended: rainExpected,
+        },
         source: "Open-Meteo",
       };
     },
@@ -231,4 +252,31 @@ function buildGoogleMapsUrl(origin: string, destination: string, mode: string): 
   url.searchParams.set("destination", destination);
   url.searchParams.set("travelmode", mode);
   return url.toString();
+}
+
+function readNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function readFirstNumber(value: unknown): number | undefined {
+  return Array.isArray(value) ? readNumber(value[0]) : readNumber(value);
+}
+
+function isRainCode(code: number | undefined): boolean {
+  return code !== undefined && ((code >= 51 && code <= 67) || (code >= 80 && code <= 82) || code >= 95);
+}
+
+function describeWeatherCode(code: number | undefined): string {
+  if (code === 0) return "clear sky";
+  if (code === 1) return "mainly clear";
+  if (code === 2) return "partly cloudy";
+  if (code === 3) return "overcast";
+  if (code === 45 || code === 48) return "fog";
+  if (code !== undefined && code >= 51 && code <= 57) return "drizzle";
+  if (code !== undefined && code >= 61 && code <= 67) return "rain or freezing rain";
+  if (code !== undefined && code >= 71 && code <= 77) return "snow";
+  if (code !== undefined && code >= 80 && code <= 82) return "rain showers";
+  if (code !== undefined && code >= 85 && code <= 86) return "snow showers";
+  if (code !== undefined && code >= 95) return "thunderstorm";
+  return "unknown conditions";
 }

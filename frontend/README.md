@@ -55,3 +55,7 @@ this file.
 The chat displays context, agent tool events, optional directions previews, and
 the distinction between short-term messages, exact chat history, and semantic
 memory.
+
+Use the `Plan first` control in the composer to compare the explicit planning
+path with the default reactive direct loop. The planning view shows the goal,
+step statuses, tools used, and replan count without showing hidden reasoning.

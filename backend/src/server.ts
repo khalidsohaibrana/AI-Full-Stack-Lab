@@ -28,6 +28,11 @@ import type { VectorStore } from "./vector-store/types.js";
 import { learningTools } from "./tools/learning-tools.js";
 import { ToolRegistry } from "./tools/tool-registry.js";
 import { createExternalTools } from "./tools/external-tools.js";
+import { createGroundedWeatherResponse, isWeatherRequest } from "./tools/weather-response.js";
+import { createPlan } from "./planning/planner.js";
+import { executePlan } from "./planning/plan-executor.js";
+import type { AgentRunResult } from "./agent/types.js";
+import type { PlanExecutionResult } from "./planning/types.js";
 
 const config = loadConfig();
 const app = express();
@@ -193,6 +198,7 @@ app.get("/api/health", async (_request, response) => {
       maxToolResultChars: config.agent.maxToolResultChars,
       tools: toolRegistry.listDefinitions().map((tool) => tool.name),
     },
+    planning: config.planning,
     externalTools: {
       geocodingBaseUrl: config.external.geocodingBaseUrl,
       weatherBaseUrl: config.external.weatherBaseUrl,
@@ -347,10 +353,11 @@ app.get("/api/memories", async (request, response) => {
 });
 
 app.post("/api/chat", async (request, response) => {
-  const { messages: rawMessages, userId: rawUserId, conversationId } = request.body as {
+  const { messages: rawMessages, userId: rawUserId, conversationId, planning: rawPlanning } = request.body as {
     messages?: unknown;
     userId?: unknown;
     conversationId?: unknown;
+    planning?: unknown;
     currentLocation?: unknown;
   };
 
@@ -417,6 +424,11 @@ app.post("/api/chat", async (request, response) => {
     typeof rawUserId === "string" && rawUserId.trim().length > 0
       ? rawUserId.trim()
       : config.retrieval.defaultUserId;
+  if (rawPlanning !== undefined && typeof rawPlanning !== "boolean") {
+    response.status(400).json({ error: "planning must be a boolean when provided" });
+    return;
+  }
+  const planningEnabled = rawPlanning === true || (config.planning.enabled && rawPlanning !== false);
   if (
     conversationId !== undefined &&
     conversationId !== null &&
@@ -460,7 +472,7 @@ app.post("/api/chat", async (request, response) => {
   const toolSummary = toolDefinitions
     .map((tool) => `- ${tool.name}: ${tool.description}`)
     .join("\n");
-  const agentInstructions = `${instructions}\n\nAvailable tools:\n${toolSummary}\nUse a tool when it is useful for the user's request. If no tool is needed, answer directly. Preserve locations explicitly provided by the user. Use current location only when the user explicitly asks for it.`;
+  const agentInstructions = `${instructions}\n\nAvailable tools:\n${toolSummary}\nUse a tool when it is useful for the user's request. If no tool is needed, answer directly. Preserve locations explicitly provided by the user. Use current location only when the user explicitly asks for it. Treat tool output as authoritative evidence. For weather, use the normalized fields when present: weatherDescription, currentPrecipitationMm, precipitationProbabilityPercent, rainExpected, and umbrellaRecommended. Never invent a precipitation percentage or claim rain when those fields say otherwise. Only provide umbrella advice when the user asks about umbrellas, rain, or precipitation.`;
 
   let managedContext;
 
@@ -490,8 +502,88 @@ app.post("/api/chat", async (request, response) => {
     throw error;
   }
 
+  const executeTool = async (call: { id: string; name: string; arguments: unknown }) => {
+    const result = await toolRegistry.execute(
+      call.name,
+      call.arguments,
+      {
+        userId,
+        conversationId:
+          typeof activeConversationId === "string" ? activeConversationId : undefined,
+        currentLocation,
+      },
+      config.agent.toolTimeoutMs,
+    );
+    const serialized = JSON.stringify(result.output) ?? String(result.output);
+    if (serialized.length > config.agent.maxToolResultChars) {
+      return {
+        ...result,
+        toolCallId: call.id,
+        output: {
+          error: `Tool result exceeded the ${config.agent.maxToolResultChars}-character limit.`,
+        },
+        isError: true,
+      };
+    }
+    return { ...result, toolCallId: call.id };
+  };
+
   try {
-    const agentResult = await runAgent({
+    let agentResult: AgentRunResult;
+    let planResult: PlanExecutionResult | null = null;
+
+    if (planningEnabled) {
+      const plan = await createPlan({
+        client: modelClient,
+        model: aiModel,
+        maxOutputTokens: config.ai.maxOutputTokens,
+        userRequest: latestUserMessage?.content ?? "",
+        tools: toolDefinitions,
+        maxSteps: config.planning.maxSteps,
+        maxGenerationAttempts: config.planning.maxGenerationAttempts,
+      });
+      planResult = await executePlan({
+        plan,
+        execute: executeTool,
+        maxStepRetries: config.planning.maxStepRetries,
+        maxReplans: config.planning.maxReplans,
+        replan: async (failedPlan, error, results) => createPlan({
+          client: modelClient,
+          model: aiModel,
+          maxOutputTokens: config.ai.maxOutputTokens,
+          userRequest: latestUserMessage?.content ?? "",
+          tools: toolDefinitions,
+          maxSteps: config.planning.maxSteps,
+          maxGenerationAttempts: config.planning.maxGenerationAttempts,
+          replanningContext: JSON.stringify({ failedPlan, error, results }),
+        }),
+      });
+      const planSummary = JSON.stringify({
+        goal: planResult.plan.goal,
+        steps: planResult.plan.steps,
+        results: planResult.results.map(({ step, result }) => ({ step: step.description, output: result.output })),
+      });
+      const finalResponse = await completeWithOpenAICompatibleProvider(
+        modelClient,
+        aiModel,
+        config.ai.maxOutputTokens,
+        {
+          messages: [
+            { role: "system", content: `${agentInstructions}\nYou are now summarizing a completed execution plan. Answer only what the original user requested; do not volunteer unrelated recommendations or advice. Treat tool output as authoritative evidence. Do not invent facts or reinterpret numeric fields when a normalized field is available. For weather, use normalized.rainExpected, normalized.precipitationProbabilityPercent, normalized.currentPrecipitationMm, and normalized.weatherDescription. Translate internal field names into natural language; never expose property paths such as normalized.rainExpected to the user. Mention umbrella guidance only when the original user explicitly asks about rain, precipitation, or carrying an umbrella. Do not mention hidden reasoning.` },
+            { role: "user", content: `Original request: ${latestUserMessage?.content ?? ""}\nExecution data: ${planSummary}` },
+          ],
+          tools: [],
+        },
+      );
+      if (finalResponse.kind !== "final") throw new AgentLoopError("The planning summary requested an unexpected tool call.", "invalid_model_response");
+      agentResult = {
+        text: finalResponse.text,
+        messages: [],
+        events: [{ type: "started" }, { type: "finished", iterations: 1 }],
+        iterations: 1,
+      };
+    } else {
+      agentResult = await runAgent({
       messages: [
         { role: "system", content: agentInstructions },
         ...managedContext.messages,
@@ -504,30 +596,31 @@ app.post("/api/chat", async (request, response) => {
           config.ai.maxOutputTokens,
           agentRequest,
         ),
-      execute: async (call) => {
-        const result = await toolRegistry.execute(
-          call.name,
-          call.arguments,
-          { userId, currentLocation },
-          config.agent.toolTimeoutMs,
-        );
-        const serialized = JSON.stringify(result.output) ?? String(result.output);
-        if (serialized.length > config.agent.maxToolResultChars) {
-          return {
-            ...result,
-            toolCallId: call.id,
-            output: {
-              error: `Tool result exceeded the ${config.agent.maxToolResultChars}-character limit.`,
-            },
-            isError: true,
-          };
-        }
-
-        return { ...result, toolCallId: call.id };
-      },
+      execute: executeTool,
       maxIterations: config.agent.maxIterations,
       maxToolCalls: config.agent.maxToolCalls,
-    });
+      });
+    }
+
+    const executionOutputs = planningEnabled
+      ? planResult?.results.map(({ result }) => result.output) ?? []
+      : agentResult.events
+          .flatMap((event) =>
+            event.type === "tool_completed" && !event.isError ? [event.output] : [],
+          );
+    if (isWeatherRequest(latestUserMessage?.content ?? "")) {
+      const groundedWeatherResponse = createGroundedWeatherResponse(
+        latestUserMessage?.content ?? "",
+        executionOutputs,
+      );
+      if (!groundedWeatherResponse) {
+        throw new AgentLoopError(
+          "Weather data could not be retrieved, so I cannot give a reliable weather answer.",
+          "missing_weather_evidence",
+        );
+      }
+      agentResult = { ...agentResult, text: groundedWeatherResponse };
+    }
 
     if (!activeConversationId) {
       const conversation = await chatHistoryStore.createConversation(userId);
@@ -558,6 +651,15 @@ app.post("/api/chat", async (request, response) => {
         events: agentResult.events,
         toolCalls: agentResult.events.filter((event) => event.type === "tool_selected").length,
       },
+      planning: planResult
+        ? {
+            enabled: true,
+            goal: planResult.plan.goal,
+            steps: planResult.plan.steps,
+            events: planResult.events,
+            replans: planResult.replans,
+          }
+        : { enabled: false },
     });
   } catch (error) {
     if (error instanceof AgentLoopError) {
@@ -569,7 +671,10 @@ app.post("/api/chat", async (request, response) => {
     }
 
     console.error(error);
-    response.status(502).json({ error: "agent request failed" });
+    response.status(502).json({
+      error: error instanceof Error ? error.message : "agent request failed",
+      code: "agent_request_failed",
+    });
   }
 });
 

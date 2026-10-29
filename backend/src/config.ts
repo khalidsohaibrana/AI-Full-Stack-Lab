@@ -25,6 +25,13 @@ export type AppConfig = {
     toolTimeoutMs: number;
     maxToolResultChars: number;
   };
+  planning: {
+    enabled: boolean;
+    maxSteps: number;
+    maxReplans: number;
+    maxStepRetries: number;
+    maxGenerationAttempts: number;
+  };
   external: {
     geocodingBaseUrl: string;
     weatherBaseUrl: string;
@@ -72,6 +79,11 @@ const defaults = {
   agentMaxToolCalls: 10,
   agentToolTimeoutMs: 10_000,
   agentMaxToolResultChars: 8_000,
+  planningEnabled: false,
+  planningMaxSteps: 8,
+  planningMaxReplans: 2,
+  planningMaxStepRetries: 1,
+  planningMaxGenerationAttempts: 2,
   geocodingBaseUrl: "https://nominatim.openstreetmap.org/search",
   weatherBaseUrl: "https://api.open-meteo.com/v1/forecast",
   routingBaseUrl: "https://router.project-osrm.org",
@@ -324,6 +336,12 @@ export function loadConfig(
     agentValidationErrors,
   );
   validationErrors.push(...agentValidationErrors);
+  const planningValidationErrors: string[] = [];
+  const planningMaxSteps = readPositiveInteger(environment, "AI_PLANNER_MAX_STEPS", defaults.planningMaxSteps, planningValidationErrors);
+  const planningMaxReplans = readNonNegativeInteger(environment, "AI_PLANNER_MAX_REPLANS", defaults.planningMaxReplans, planningValidationErrors);
+  const planningMaxStepRetries = readNonNegativeInteger(environment, "AI_PLANNER_MAX_STEP_RETRIES", defaults.planningMaxStepRetries, planningValidationErrors);
+  const planningMaxGenerationAttempts = readPositiveInteger(environment, "AI_PLANNER_MAX_GENERATION_ATTEMPTS", defaults.planningMaxGenerationAttempts, planningValidationErrors);
+  validationErrors.push(...planningValidationErrors);
 
   if (storageProvider === "postgres" && !databaseUrl) {
     storageValidationErrors.push(
@@ -379,6 +397,13 @@ export function loadConfig(
       maxToolCalls: agentMaxToolCalls,
       toolTimeoutMs: agentToolTimeoutMs,
       maxToolResultChars: agentMaxToolResultChars,
+    },
+    planning: {
+      enabled: readBoolean(environment, "AI_PLANNING_ENABLED", defaults.planningEnabled, validationErrors),
+      maxSteps: planningMaxSteps,
+      maxReplans: planningMaxReplans,
+      maxStepRetries: planningMaxStepRetries,
+      maxGenerationAttempts: planningMaxGenerationAttempts,
     },
     external: {
       geocodingBaseUrl:

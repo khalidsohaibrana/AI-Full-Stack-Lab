@@ -19,7 +19,7 @@ test("weather resolves a place and requests today's forecast", async () => {
         results: [{ name: "Lahore", admin1: "Punjab", country: "Pakistan", latitude: 31.52, longitude: 74.35 }],
       });
     }
-    return Response.json({ timezone: "Asia/Karachi", current: { temperature_2m: 29 }, daily: { weather_code: [1] } });
+    return Response.json({ timezone: "Asia/Karachi", current: { temperature_2m: 29, precipitation: 0, weather_code: 0 }, daily: { weather_code: [2], precipitation_probability_max: [0] } });
   };
 
   try {
@@ -29,6 +29,13 @@ test("weather resolves a place and requests today's forecast", async () => {
 
     assert.equal((result as { location: string }).location, "Lahore, Punjab, Pakistan");
     assert.match(requestedUrls[1]!, /temperature_2m/);
+    assert.deepEqual((result as { normalized: unknown }).normalized, {
+      currentPrecipitationMm: 0,
+      precipitationProbabilityPercent: 0,
+      weatherDescription: "clear sky",
+      rainExpected: false,
+      umbrellaRecommended: false,
+    });
   } finally {
     globalThis.fetch = originalFetch;
   }
